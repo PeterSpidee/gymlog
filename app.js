@@ -26,7 +26,7 @@ const cap = s => s.charAt(0).toUpperCase() + s.slice(1);
 const norm = s => String(s).normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
 const DAY = 864e5;
 /** Version affichée dans Réglages (à augmenter à chaque mise en ligne) */
-const APP_VERSION = '1.12';
+const APP_VERSION = '1.13';
 
 const MONTHS = ['Janvier', 'Février', 'Mars', 'Avril', 'Mai', 'Juin', 'Juillet', 'Août', 'Septembre', 'Octobre', 'Novembre', 'Décembre'];
 const MONTHS_SHORT = ['janv.', 'févr.', 'mars', 'avr.', 'mai', 'juin', 'juil.', 'août', 'sept.', 'oct.', 'nov.', 'déc.'];
@@ -736,6 +736,7 @@ function viewSeances() {
       <button class="se-tile free tap" data-action="start-free"><span class="se-play">${ICON.play}</span><span><b>Entraînement libre</b><small>Démarre direct sans plan</small></span></button>
       <button class="se-tile tap" data-action="new-template">${ICON.plus}<b>SÉANCE</b></button>
     </div>
+    <button class="import-link tap" data-action="import-tpl">${ICON.download}<span>Importer une séance partagée</span>${ICON.chevR}</button>
     <div id="se-list">${seancesList()}</div>`;
 }
 
@@ -815,6 +816,7 @@ ACTIONS['tpl-menu'] = el => {
     { label: 'Modifier', fn: () => openTemplateEditor(t.id) },
     { label: 'Voir la progression', fn: () => openTemplateStats(t.id) },
     { label: folder ? `Déplacer (dossier : ${folder.name})` : 'Déplacer vers un dossier', fn: () => moveTemplateSheet(t) },
+    { label: 'Partager à un ami', icon: ICON.share, fn: () => openShareSheet(t) },
     { label: 'Dupliquer', fn: async () => { await save('templates', { ...JSON.parse(JSON.stringify(t)), id: uid(), name: t.name + ' (copie)', order: (t.order ?? 0) + 0.5 }); await renumberTemplates(); renderTab(); toast('Séance dupliquée'); } },
     { label: 'Supprimer', danger: true, fn: async () => { if (!await confirmSheet(`Supprimer « ${t.name} » ?`, 'L\'historique des entraînements est conservé.', 'Supprimer', true)) return; await removeItem('templates', t.id); renderTab(); } }
   ]);
@@ -1192,6 +1194,7 @@ function openTemplateEditor(id, folderId = null) {
       ]),
       'te-menu': () => actionSheet(draft.name || 'Séance', [
         { label: 'Démarrer', icon: ICON.play, fn: () => pg.actions['te-start']() },
+        ...(draft.exercises.length ? [{ label: 'Partager à un ami', icon: ICON.share, fn: () => openShareSheet({ ...draft, name: draft.name.trim() || 'Séance' }) }] : []),
         { label: 'Ajouter un exercice', fn: () => pg.actions['te-add']() },
         { label: 'Ajouter un circuit', fn: () => pg.actions['te-add-circuit']() },
         ...(src ? [
@@ -1282,6 +1285,210 @@ function openTemplateEditor(id, folderId = null) {
     refreshAll();
     return true;
   }
+}
+
+/* ============== Partage de séances entre amis =========================
+   Une séance type est encodée dans un lien :
+     https://…/gymlog/#import=<code>
+   Le code contient le JSON de la séance, compressé (deflate) puis en base64.
+   Les exercices perso utilisés sont joints, pour être recréés chez l'ami.
+   Sur iPhone, un lien s'ouvre dans Safari, qui n'a pas accès aux données de
+   l'app installée : Safari propose alors de copier la séance, à coller
+   ensuite dans l'app (Séances → Importer une séance partagée). */
+ICON.share = svg('<path d="M12 3v12M7.5 7.5L12 3l4.5 4.5"/><path d="M5 12v7a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-7"/>');
+ICON.download = svg('<path d="M12 4v11M7.5 10.5L12 15l4.5-4.5"/><path d="M5 19h14"/>');
+const SHARE_BASE = location.origin + location.pathname.replace(/index\.html$/, '');
+
+function bytesToB64u(bytes) {
+  let bin = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+function b64uToBytes(s) {
+  const bin = atob(s.replace(/-/g, '+').replace(/_/g, '/') + '==='.slice((s.length + 3) % 4));
+  return Uint8Array.from(bin, c => c.charCodeAt(0));
+}
+async function streamBytes(bytes, transform) {
+  return new Uint8Array(await new Response(new Blob([bytes]).stream().pipeThrough(transform)).arrayBuffer());
+}
+async function encodeShare(obj) {
+  let bytes = new TextEncoder().encode(JSON.stringify(obj)), tag = 'j';
+  if ('CompressionStream' in window) { try { bytes = await streamBytes(bytes, new CompressionStream('deflate-raw')); tag = 'z'; } catch (e) { /* non compressé */ } }
+  return tag + bytesToB64u(bytes);
+}
+async function decodeShare(code) {
+  let bytes = b64uToBytes(code.slice(1));
+  if (code[0] === 'z') bytes = await streamBytes(bytes, new DecompressionStream('deflate-raw'));
+  const obj = JSON.parse(new TextDecoder().decode(bytes));
+  if (!obj || obj.app !== 'GymLog' || !obj.t || !Array.isArray(obj.t.exercises)) throw new Error('format');
+  return obj;
+}
+/** Extrait le code d'un lien ou d'un texte collé */
+function shareCodeFrom(text) {
+  const m = String(text || '').match(/#import=([A-Za-z0-9_-]+)/) || String(text || '').trim().match(/^([zj][A-Za-z0-9_-]{10,})$/);
+  return m ? m[1] : null;
+}
+
+/** Contenu partagé : la séance (sans identifiants internes) + les exercices perso utilisés */
+function buildSharePayload(t, withWeights) {
+  const tt = normalizeTpl(JSON.parse(JSON.stringify(t)));
+  const ids = new Set(tplExIds(tt));
+  const exercises = tt.exercises.map(e => e.kind === 'circuit'
+    ? { kind: 'circuit', name: e.name, format: e.format, rounds: e.rounds, work: e.work, rest: e.rest, minutes: e.minutes, items: e.items.map(it => ({ exerciseId: it.exerciseId, reps: it.reps, weight: withWeights ? it.weight : null })) }
+    : { exerciseId: e.exerciseId, restTime: e.restTime, tempo: e.tempo || '', supersetId: e.supersetId || null, sets: e.sets.map(s => ({ type: s.type, reps: s.reps, weight: withWeights ? s.weight : null })) });
+  const x = [...ids].map(id => EX.get(id)).filter(e => e && e.isCustom).map(e => ({ id: e.id, name: e.name, muscleGroup: e.muscleGroup, secondaryMuscle: e.secondaryMuscle, equipment: e.equipment }));
+  return { app: 'GymLog', v: 1, t: { name: tt.name, exercises }, x };
+}
+
+/** Feuille « Partager la séance » */
+async function openShareSheet(t) {
+  const st = { weights: false, link: '' };
+  const make = async () => { st.link = SHARE_BASE + '#import=' + await encodeShare(buildSharePayload(t, st.weights)); };
+  await make(); // lien prêt AVANT le geste « Partager » (exigence iOS)
+  const n = t.exercises.length;
+  const sh = openSheet({
+    html: `<div class="dialog left"><h3>Partager « ${esc(t.name)} »</h3>
+      <p class="muted sm">${n} exercice${n > 1 ? 's' : ''} : ${esc(tplExNames(t).join(', '))}</p>
+      <p class="muted sm">Ton ami reçoit un lien. Il l'ajoute à ses séances sans rien effacer chez lui. Tes données (historique, records, mesures) ne sont jamais partagées.</p>
+      <button class="toggle-row" data-action="sh-w"><span class="tgl"></span><span>Inclure mes charges cibles</span></button>
+      <button class="btn-primary" data-action="sh-go">${ICON.share} Partager le lien</button>
+      <button class="btn-plain" data-action="sh-copy">Copier le lien</button></div>`,
+    actions: {
+      'sh-w': async el => { st.weights = !st.weights; el.classList.toggle('on', st.weights); await make(); },
+      'sh-go': () => {
+        const text = `Séance « ${t.name} » à ajouter dans GymLog 💪`;
+        if (navigator.share) {
+          navigator.share({ title: `GymLog · ${t.name}`, text, url: st.link }).then(() => sh.close()).catch(e => { if (e && e.name !== 'AbortError') copyText(st.link); });
+        } else copyText(st.link);
+      },
+      'sh-copy': () => copyText(st.link)
+    }
+  });
+}
+function copyText(text) {
+  const done = () => toast('Lien copié');
+  if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(done, () => fallbackCopy(text, done));
+  else fallbackCopy(text, done);
+}
+function fallbackCopy(text, done) {
+  const ta = document.createElement('textarea');
+  ta.value = text; ta.setAttribute('readonly', ''); ta.style.position = 'fixed'; ta.style.opacity = '0';
+  document.body.appendChild(ta); ta.select(); ta.setSelectionRange(0, text.length);
+  try { document.execCommand('copy'); done(); } catch (e) { toast('Copie impossible : sélectionne le lien à la main'); }
+  ta.remove();
+}
+
+/** Feuille « Importer une séance partagée » : coller le lien reçu */
+function openImportSheet(prefill = '') {
+  const sh = openSheet({
+    html: `<div class="dialog left"><h3>Importer une séance</h3>
+      <p class="muted sm">Colle le lien reçu de ton ami (ou copié depuis Safari).</p>
+      <textarea class="field area" id="imp-in" placeholder="${esc(SHARE_BASE)}#import=…" autocomplete="off" autocapitalize="off" spellcheck="false">${esc(prefill)}</textarea>
+      <button class="btn-soft wide" data-action="imp-paste">${ICON.download}<span>Coller</span></button>
+      <button class="btn-primary" data-action="imp-go">Continuer</button>
+      <button class="btn-plain" data-action="sheet-close">Annuler</button></div>`,
+    actions: {
+      'imp-paste': async () => {
+        try { const t = await navigator.clipboard.readText(); $('#imp-in', sh.el).value = t; if (shareCodeFrom(t)) sh.actions['imp-go'](); else toast('Le presse-papiers ne contient pas de séance'); }
+        catch (e) { toast('Touche longuement le champ puis « Coller »'); $('#imp-in', sh.el).focus(); }
+      },
+      'imp-go': async () => {
+        const code = shareCodeFrom($('#imp-in', sh.el).value);
+        if (!code) { toast('Lien de séance introuvable'); return; }
+        try { const data = await decodeShare(code); sh.close(); openImportPreview(data); }
+        catch (e) { toast('Ce lien de séance est invalide ou incomplet'); }
+      }
+    }
+  });
+}
+ACTIONS['import-tpl'] = () => openImportSheet();
+
+/** Aperçu avant ajout : nom, exercices, dossier */
+function openImportPreview(data) {
+  const t = data.t;
+  const customs = data.x || [];
+  const nameOf = id => EX.get(id)?.name || customs.find(c => c.id === id)?.name || 'Exercice inconnu';
+  const items = t.exercises.map(e => e.kind === 'circuit'
+    ? `<li><b>${esc(e.name || 'Circuit')}</b> <span class="muted sm">circuit ${esc(CIRCUIT_FORMATS[e.format] || '')} · ${e.items.map(it => esc(nameOf(it.exerciseId))).join(', ')}</span></li>`
+    : `<li><b>${esc(nameOf(e.exerciseId))}</b> <span class="muted sm">${e.sets.length} série${e.sets.length > 1 ? 's' : ''}${e.sets[0] && e.sets[0].reps ? ' · ' + esc(e.sets[0].reps) + ' reps' : ''}</span></li>`).join('');
+  const st = { folderId: null };
+  const folderLabel = () => S.data.folders.find(f => f.id === st.folderId)?.name || 'Racine';
+  const body = () => `<div class="dialog left"><h3>Séance partagée</h3>
+    <div class="card imp-card"><b class="cond-b">${esc(t.name)}</b><ul class="imp-list">${items}</ul></div>
+    ${customs.some(c => !S.data.exercises.some(e => norm(e.name) === norm(c.name))) ? '<p class="muted sm">Les exercices perso de ton ami seront ajoutés à ta bibliothèque.</p>' : ''}
+    <button class="te-folder" data-action="ip-folder"><span>Enregistrer dans · ${esc(folderLabel())}</span>${ICON.chevR}</button>
+    <button class="btn-primary" data-action="ip-ok">${ICON.plus} Ajouter à mes séances</button>
+    <button class="btn-plain" data-action="sheet-close">Annuler</button></div>`;
+  const sh = openSheet({
+    html: body(),
+    actions: {
+      'ip-folder': () => actionSheet('Enregistrer dans', [
+        { label: 'Racine (aucun dossier)', fn: () => { st.folderId = null; sh.set(body()); } },
+        ...sortedFolders().map(f => ({ label: f.name, icon: ICON.folder, fn: () => { st.folderId = f.id; sh.set(body()); } }))
+      ]),
+      'ip-ok': async () => { const nt = await importSharedTemplate(data, st.folderId); sh.close(); S.tab = 'seances'; while (pages.length) popPage(); refreshAll(); toast(`« ${nt.name} » ajoutée à tes séances`); }
+    }
+  });
+}
+
+/** Ajoute la séance partagée (exercices perso recréés si besoin) */
+async function importSharedTemplate(data, folderId) {
+  const map = {};
+  for (const c of data.x || []) {
+    const same = S.data.exercises.find(e => norm(e.name) === norm(c.name));
+    if (same) { map[c.id] = same.id; continue; }
+    const ex = { id: 'cx-' + uid(), name: c.name, muscleGroup: MUSCLES[c.muscleGroup] ? c.muscleGroup : 'pectoraux', secondaryMuscle: MUSCLES[c.secondaryMuscle] ? c.secondaryMuscle : null, equipment: EQUIPMENT[c.equipment] ? c.equipment : 'halteres', isCustom: true };
+    await save('exercises', ex);
+    map[c.id] = ex.id;
+  }
+  const fix = id => map[id] || id;
+  const ok = id => EX.has(fix(id));
+  let name = String(data.t.name || 'Séance partagée').slice(0, 60);
+  if (S.data.templates.some(x => norm(x.name) === norm(name))) name += ' (partagée)';
+  const ssMap = {};
+  const t = normalizeTpl({
+    id: uid(), name, folderId, order: S.data.templates.length,
+    exercises: data.t.exercises.map(e => e.kind === 'circuit'
+      ? { kind: 'circuit', id: uid(), name: e.name || 'Circuit', format: CIRCUIT_FORMATS[e.format] ? e.format : 'rounds', rounds: +e.rounds || 3, work: +e.work || 40, rest: +e.rest || 0, minutes: +e.minutes || 10,
+          items: (e.items || []).filter(it => ok(it.exerciseId)).map(it => ({ exerciseId: fix(it.exerciseId), reps: it.reps || '10', weight: it.weight ?? null })) }
+      : ok(e.exerciseId) ? { exerciseId: fix(e.exerciseId), restTime: +e.restTime || 0, tempo: e.tempo || '', supersetId: e.supersetId ? (ssMap[e.supersetId] ||= uid()) : null,
+          sets: (e.sets || []).map(s => ({ type: SET_TYPES[s.type] ? s.type : 'normal', reps: s.reps || null, weight: s.weight ?? null })) } : null).filter(Boolean)
+  });
+  await save('templates', t);
+  if (folderId) S.openFolders[folderId] = true;
+  return t;
+}
+
+/** Ouverture d'un lien de partage (#import=…) */
+async function handleShareLink() {
+  const code = shareCodeFrom(location.hash);
+  if (!code) return;
+  history.replaceState(null, '', location.pathname + location.search); // évite un 2e import au rechargement
+  let data;
+  try { data = await decodeShare(code); } catch (e) { toast('Ce lien de séance est invalide'); return; }
+  const standalone = window.navigator.standalone === true || matchMedia('(display-mode: standalone)').matches;
+  const iOS = /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  if (standalone || !iOS) { openImportPreview(data); return; }
+  // Safari sur iPhone : les données de l'app installée ne sont pas accessibles ici
+  const link = SHARE_BASE + '#import=' + code;
+  openSheet({
+    html: `<div class="dialog left"><h3>Séance « ${esc(data.t.name)} »</h3>
+      <p class="muted sm">${data.t.exercises.length} exercice${data.t.exercises.length > 1 ? 's' : ''} à ajouter dans GymLog.</p>
+      <div class="card imp-steps">
+        <b>Tu as déjà GymLog sur ton écran d'accueil ?</b>
+        <ol><li>Touche « Copier la séance » ci-dessous.</li><li>Ouvre <b>GymLog depuis l'écran d'accueil</b>.</li><li>Séances → « Importer une séance partagée » → « Coller ».</li></ol>
+      </div>
+      <button class="btn-primary" data-action="sl-copy">${ICON.download} Copier la séance</button>
+      <div class="card imp-steps">
+        <b>Pas encore installée ?</b>
+        <ol><li>Copie d'abord la séance (bouton ci-dessus).</li><li>Touche <b>Partager</b> ⬆︎ puis <b>« Sur l'écran d'accueil »</b>.</li><li>Ouvre GymLog depuis l'icône, puis importe la séance comme ci-dessus.</li></ol>
+      </div>
+      <button class="btn-plain" data-action="sl-here">Utiliser GymLog dans Safari</button></div>`,
+    actions: {
+      'sl-copy': () => copyText(link),
+      'sl-here': el => { findCtx(el).close(); openImportPreview(data); }
+    }
+  });
 }
 
 /* ================= 7. BIBLIOTHÈQUE D'EXERCICES =========================== */
@@ -3558,6 +3765,8 @@ async function init() {
   renderTab();
   if (S.active) renderWorkout();
   setInterval(tick, 250);
+  handleShareLink();
+  window.addEventListener('hashchange', handleShareLink);
 
   // Masque l'écran de démarrage
   const sp = $('#splash');
