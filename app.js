@@ -26,7 +26,7 @@ const cap = s => s.charAt(0).toUpperCase() + s.slice(1);
 const norm = s => String(s).normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
 const DAY = 864e5;
 /** Version affichée dans Réglages (à augmenter à chaque mise en ligne) */
-const APP_VERSION = '1.9';
+const APP_VERSION = '1.10';
 
 const MONTHS = ['Janvier', 'Février', 'Mars', 'Avril', 'Mai', 'Juin', 'Juillet', 'Août', 'Septembre', 'Octobre', 'Novembre', 'Décembre'];
 const MONTHS_SHORT = ['janv.', 'févr.', 'mars', 'avr.', 'mai', 'juin', 'juil.', 'août', 'sept.', 'oct.', 'nov.', 'déc.'];
@@ -409,6 +409,49 @@ function restPickerSheet(current) {
         <div class="grid-opts">${opts.map(s => `<button class="opt-pill ${s === current ? 'on' : ''}" data-action="pick" data-v="${s}">${s ? fmtClock(s) : 'Aucun'}</button>`).join('')}</div>
         <button class="btn-plain" data-action="sheet-close">Annuler</button></div>`,
       actions: { pick: el => { finish(+el.dataset.v); sh.close(); } },
+      onClose: () => finish(null)
+    });
+  });
+}
+
+/**
+ * Choix des répétitions visées : un nombre fixe (10) ou une fourchette (8-12).
+ * Champs Min / Max au pavé numérique + fourchettes toutes prêtes.
+ * -> Promise<{ text: '8-12' | '10' | null, all: boolean } | null>
+ */
+function repsRangeSheet(current, withAll = false) {
+  const r = parseRange(current);
+  const st = { min: r ? r.min : '', max: r && r.max !== r.min ? r.max : '', all: false };
+  const PRESETS = ['6-8', '8-10', '8-12', '10-12', '12-15', '15-20'];
+  const text = () => {
+    const a = parseInt(st.min, 10), b = parseInt(st.max, 10);
+    if (!(a > 0)) return null;
+    if (!(b > 0) || b === a) return String(a);
+    return `${Math.min(a, b)}-${Math.max(a, b)}`;
+  };
+  return new Promise(resolve => {
+    let done = false;
+    const finish = v => { if (!done) { done = true; resolve(v); } };
+    const body = () => `<div class="dialog"><h3>Répétitions visées</h3>
+      <div class="range-in">
+        <label><span>MIN</span><input inputmode="numeric" data-input="rr-min" value="${st.min}" placeholder="8"></label>
+        <b>–</b>
+        <label><span>MAX</span><input inputmode="numeric" data-input="rr-max" value="${st.max}" placeholder="12"></label>
+      </div>
+      <p class="muted sm">Laisse « Max » vide pour viser un nombre fixe.</p>
+      <div class="grid-opts three">${PRESETS.map(v => `<button class="opt-pill ${text() === v ? 'on' : ''}" data-action="rr-p" data-v="${v}">${v}</button>`).join('')}</div>
+      ${withAll ? `<button class="toggle-row ${st.all ? 'on' : ''}" data-action="rr-all"><span class="tgl"></span><span>Appliquer à toutes les séries de l'exercice</span></button>` : ''}
+      <button class="btn-primary" data-action="rr-ok">Valider</button>
+      <button class="btn-plain" data-action="rr-clear">Aucun objectif</button></div>`;
+    const sh = openSheet({
+      html: body(),
+      inputs: { 'rr-min': el => { st.min = el.value.replace(/\D/g, ''); }, 'rr-max': el => { st.max = el.value.replace(/\D/g, ''); } },
+      actions: {
+        'rr-p': el => { const [a, b] = el.dataset.v.split('-'); st.min = a; st.max = b; sh.set(body()); },
+        'rr-all': el => { st.all = !st.all; el.classList.toggle('on', st.all); },
+        'rr-ok': () => { const t = text(); if (!t) { toast('Indique au moins le minimum'); return; } finish({ text: t, all: st.all }); sh.close(); },
+        'rr-clear': () => { finish({ text: null, all: st.all }); sh.close(); }
+      },
       onClose: () => finish(null)
     });
   });
@@ -1054,7 +1097,7 @@ function openTemplateEditor(id, folderId = null) {
             <button class="set-num" data-action="te-set-menu" data-i="${i}" data-j="${j}">${setLabel(e, j)}</button>
             <button class="type-pill" data-action="te-type" data-i="${i}" data-j="${j}" title="${prev[j] ? `Dernière fois : ${fmtW(prev[j].weight)}×${prev[j].reps}` : ''}">${TYPE_PILL[s.type || 'normal']}</button>
             <input class="set-in" inputmode="decimal" data-input="te-w" data-i="${i}" data-j="${j}" value="${inputW(s.weight)}" placeholder="${prev[j] ? inputW(prev[j].weight) : '—'}">
-            <input class="set-in" data-input="te-r" data-change="te-r-ok" data-i="${i}" data-j="${j}" value="${esc(s.reps || '')}" placeholder="${prev[j] ? prev[j].reps : '10'}" autocomplete="off" enterkeyhint="done">
+            <button class="set-in reps-btn ${s.reps ? '' : 'empty'}" data-action="te-reps" data-i="${i}" data-j="${j}" aria-label="Répétitions visées">${s.reps ? esc(s.reps) : (prev[j] ? prev[j].reps : '—')}</button>
             <span class="drag-h set-grip" aria-label="Déplacer la série">${ICON.grip2}</span>
           </div>`).join('')}</div>
         <button class="btn-add-set dashed in-table" data-action="te-add-set" data-i="${i}">${ICON.plus} Ajouter une série</button>
@@ -1160,6 +1203,13 @@ function openTemplateEditor(id, folderId = null) {
         });
       },
       'te-add-set': el => { const e = exAt(el); const last = e.sets[e.sets.length - 1]; e.sets.push(last ? { ...last, type: last.type === 'warmup' ? 'normal' : last.type } : { type: 'normal', weight: null, reps: '10' }); rerender(); },
+      'te-reps': async el => {
+        const e = exAt(el), s = setAtT(el);
+        const res = await repsRangeSheet(s.reps, e.sets.length > 1);
+        if (!res) return;
+        if (res.all) e.sets.forEach(x => { if (isWork(x)) x.reps = res.text; }); else s.reps = res.text;
+        rerender();
+      },
       'te-type': el => {
         const s = setAtT(el);
         actionSheet('Type de série', Object.entries(SET_TYPES).map(([k, v]) => ({ label: v.label + (s.type === k ? ' ✓' : ''), fn: () => { s.type = k; rerender(); } })));
@@ -1177,7 +1227,7 @@ function openTemplateEditor(id, folderId = null) {
         const canSS = next && next.kind !== 'circuit' && !(e.supersetId && next.supersetId === e.supersetId);
         const move = d => { [draft.exercises[i + d], draft.exercises[i]] = [draft.exercises[i], draft.exercises[i + d]]; rerender(); };
         actionSheet(exName(e.exerciseId), [
-          { label: 'Reps pour toutes les séries', fn: async () => { const v = await inputSheet('Répétitions visées', e.sets.find(isWork)?.reps || '', 'Ex. : 10 ou 8-12'); if (v == null) return; const r = parseRange(v); if (v && !r) { toast('Format : 10 ou 8-12'); return; } e.sets.forEach(s => { if (isWork(s)) s.reps = r ? r.text : null; }); rerender(); } },
+          { label: 'Reps pour toutes les séries', fn: async () => { const res = await repsRangeSheet(e.sets.find(isWork)?.reps); if (!res) return; e.sets.forEach(s => { if (isWork(s)) s.reps = res.text; }); rerender(); } },
           { label: `Charge pour toutes les séries (${unit()})`, fn: async () => { const v = await inputSheet(`Charge (${unit()})`, '', 'Ex. : 60'); if (v == null) return; const n = parseNum(v); e.sets.forEach(s => { if (isWork(s)) s.weight = n == null ? null : fromU(n); }); rerender(); } },
           ...(canSS ? [{ label: 'Superset avec l\'exercice suivant', fn: () => { const sid = e.supersetId || next.supersetId || uid(); e.supersetId = sid; next.supersetId = sid; rerender(); } }] : []),
           ...(e.supersetId ? [{ label: 'Retirer du superset', fn: () => { e.supersetId = null; cleanSupersets(draft.exercises); rerender(); } }] : []),
@@ -1757,7 +1807,12 @@ ACTIONS['w-ex-menu'] = el => {
   actionSheet(exName(ex.exerciseId), [
     { label: 'Historique de l\'exercice', fn: () => openExerciseDetail(ex.exerciseId) },
     { label: (EX.get(ex.exerciseId)?.note ? 'Modifier la note' : 'Ajouter une note'), fn: () => ACTIONS['w-note']({ dataset: { ex: i } }) },
-    { label: 'Objectif de répétitions', fn: async () => { const v = await inputSheet('Répétitions visées', ex.targetReps || '', 'Ex. : 10 ou 8-12'); if (v == null) return; if (v && !parseRange(v)) { toast('Format : 10 ou 8-12'); return; } ex.targetReps = v ? parseRange(v).text : null; persistActive(); renderWorkout(); } },
+    { label: 'Objectif de répétitions', fn: async () => {
+        const res = await repsRangeSheet(ex.sets.find(x => !x.completed)?.target?.reps || ex.targetReps); if (!res) return;
+        ex.targetReps = res.text;
+        ex.sets.forEach(x => { if (!x.completed && isWork(x)) x.target = { weight: x.target ? x.target.weight : null, reps: res.text }; });
+        persistActive(); renderWorkout();
+      } },
     ...(canSS ? [{ label: 'Superset avec l\'exercice suivant', fn: () => { const sid = ex.supersetId || next.supersetId || uid(); ex.supersetId = sid; next.supersetId = sid; persistActive(); renderWorkout(); } }] : []),
     ...(ex.supersetId ? [{ label: 'Retirer du superset', fn: () => { ex.supersetId = null; cleanSupersets(a.exercises); persistActive(); renderWorkout(); } }] : []),
     { label: 'Remplacer l\'exercice', fn: () => openPicker(ids => { ex.exerciseId = ids[0]; ex.sets.forEach(s => { s.isRecord = false; }); recomputeRecords(ex); persistActive(); renderWorkout(); }) },

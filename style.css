@@ -1141,3 +1141,16 @@ label.btn-soft { cursor: pointer; }
 .ex-params.three b { font-size: 15px; }
 .ex-params.three svg { width: 13px; height: 13px; }
 .ex-params.three button:nth-child(2) { margin-left: 4px; }
+
+/* Sélecteur de fourchette de répétitions */
+.range-in { display: flex; align-items: flex-end; justify-content: center; gap: 12px; margin: 14px 0 6px; }
+.range-in label { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+.range-in label span { font-family: var(--font-mono); font-size: 10.5px; letter-spacing: 1.2px; color: var(--text-2); }
+.range-in input { width: 96px; height: 64px; border: 0; border-radius: 16px; background: var(--card); box-shadow: 0 0 0 .5px var(--line);
+  text-align: center; font-family: var(--font-cond); font-weight: 700; font-size: 34px; outline: none; -webkit-appearance: none; }
+.range-in input:focus { box-shadow: 0 0 0 2px var(--accent); }
+.range-in > b { font-family: var(--font-cond); font-size: 30px; padding-bottom: 12px; color: var(--text-2); }
+.grid-opts.three { grid-template-columns: repeat(3, 1fr); }
+.reps-btn { display: grid; place-items: center; font-family: var(--font-cond); font-weight: 700; font-size: 19px; border-radius: 9px; }
+.reps-btn.empty { color: var(--text); opacity: .38; }
+.reps-btn:active { background: var(--card); }
