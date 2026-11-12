@@ -26,7 +26,7 @@ const cap = s => s.charAt(0).toUpperCase() + s.slice(1);
 const norm = s => String(s).normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
 const DAY = 864e5;
 /** Version affichée dans Réglages (à augmenter à chaque mise en ligne) */
-const APP_VERSION = '1.10';
+const APP_VERSION = '1.11';
 
 const MONTHS = ['Janvier', 'Février', 'Mars', 'Avril', 'Mai', 'Juin', 'Juillet', 'Août', 'Septembre', 'Octobre', 'Novembre', 'Décembre'];
 const MONTHS_SHORT = ['janv.', 'févr.', 'mars', 'avr.', 'mai', 'juin', 'juil.', 'août', 'sept.', 'oct.', 'nov.', 'déc.'];
@@ -3160,6 +3160,7 @@ ACTIONS['open-settings'] = () => {
         <div class="card list-card">
           <button class="set-row-btn" data-action="s-export"><span>Exporter une sauvegarde (JSON)</span>${ICON.chevR}</button>
           <label class="set-row-btn"><span>Importer une sauvegarde</span>${ICON.chevR}<input type="file" accept="application/json,.json" data-change="s-import" hidden></label>
+          <button class="set-row-btn" data-action="s-examples"><span>Restaurer les séances d'exemple</span>${ICON.chevR}</button>
           <button class="set-row-btn" data-action="s-demo"><span>Générer des données de démo</span>${ICON.chevR}</button>
           <button class="set-row-btn danger" data-action="s-reset"><span>Effacer toutes les données</span></button>
         </div>
@@ -3190,6 +3191,11 @@ ACTIONS['open-settings'] = () => {
         renderPage(pg);
       },
       's-rest-auto': async () => { S.settings.restAuto = !(S.settings.restAuto !== false); await saveSettings(); renderPage(pg); },
+      's-examples': async () => {
+        const n = await restoreExampleTemplates();
+        refreshAll();
+        toast(n ? `${n} séance${n > 1 ? 's' : ''} d'exemple restaurée${n > 1 ? 's' : ''}` : 'Les séances d\'exemple sont déjà présentes');
+      },
       's-export': exportBackup,
       's-check': async () => {
         if (!navigator.onLine) { toast('Pas de connexion Internet'); return; }
@@ -3416,6 +3422,81 @@ async function forceUpdate() {
   location.reload();
 }
 
+/**
+ * Récupération : si des données sont restées dans le stockage de repli
+ * (localStorage, utilisé quand IndexedDB tardait à répondre), on les fusionne
+ * dans IndexedDB. Le jeu de données qui contient le plus d'entraînements est
+ * considéré comme « principal » ; l'autre complète sans créer de doublons
+ * (séances types et dossiers comparés par nom, le reste par identifiant).
+ */
+async function mergeFallbackData() {
+  if (DB.mode !== 'indexedDB') return 0;
+  const ls = DB.readFallback();
+  if (!ls) return 0;
+  const cur = { ...S.data };
+  const lsW = (ls.workouts || []).length, dbW = cur.workouts.length;
+  const lsPrimary = lsW > dbW || (lsW === dbW && (ls.templates || []).length > cur.templates.length);
+  const P = lsPrimary ? ls : cur, Q = lsPrimary ? cur : ls;
+  const byId = (a = [], b = []) => { const m = new Map(a.map(x => [x.id, x])); b.forEach(x => { if (!m.has(x.id)) m.set(x.id, x); }); return [...m.values()]; };
+  // Dossiers : par nom
+  const folders = [...(P.folders || [])];
+  const folderMap = {};
+  (Q.folders || []).forEach(f => {
+    const same = folders.find(x => norm(x.name) === norm(f.name));
+    if (same) folderMap[f.id] = same.id; else { folders.push({ ...f, order: folders.length }); folderMap[f.id] = f.id; }
+  });
+  // Séances types : par nom
+  const templates = [...(P.templates || [])];
+  (Q.templates || []).forEach(t => {
+    if (templates.some(x => norm(x.name) === norm(t.name))) return;
+    templates.push({ ...t, folderId: t.folderId ? (folderMap[t.folderId] || t.folderId) : null, order: templates.length });
+  });
+  const merged = {
+    workouts: byId(P.workouts, Q.workouts),
+    measurements: byId(P.measurements, Q.measurements),
+    exercises: byId(P.exercises, Q.exercises),
+    photos: byId(P.photos, Q.photos),
+    folders, templates
+  };
+  // Écriture dans IndexedDB ; on retire les doublons écartés
+  for (const st of ['workouts', 'measurements', 'exercises', 'photos', 'folders', 'templates']) {
+    if (st === 'photos' && !merged.photos.length) continue;
+    const keep = new Set(merged[st].map(x => x.id));
+    const existing = st === 'photos' ? await DB.getAll('photos') : cur[st];
+    for (const x of existing) if (!keep.has(x.id)) await DB.del(st, x.id);
+    await DB.putMany(st, merged[st]);
+  }
+  const lsSet = (ls.settings || []).find(x => x.id === 'main');
+  if (lsSet) Object.assign(S.settings, lsPrimary ? { ...S.settings, ...lsSet } : { ...lsSet, ...S.settings });
+  S.settings.seeded = true;
+  await saveSettings();
+  S.data.workouts = merged.workouts; S.data.measurements = merged.measurements; S.data.exercises = merged.exercises;
+  S.data.folders = merged.folders; S.data.templates = merged.templates;
+  DB.clearFallback();
+  return lsW + (ls.templates || []).length;
+}
+
+/** Réglages : remet les séances d'exemple manquantes (Push, Pull, Legs, Upper) */
+async function restoreExampleTemplates() {
+  const before = S.data.templates.length;
+  const keep = S.data.templates.map(t => norm(t.name));
+  const folderName = 'PPL + Upper';
+  const existingFolder = S.data.folders.find(f => norm(f.name) === norm(folderName));
+  const tmpT = [], tmpF = [];
+  const saveT = S.data.templates, saveF = S.data.folders;
+  S.data.templates = tmpT; S.data.folders = tmpF;
+  await seedTemplates(); // crée les modèles dans tmpT / tmpF
+  S.data.templates = saveT; S.data.folders = saveF;
+  const folder = existingFolder || tmpF[0];
+  if (!existingFolder) { folder.order = S.data.folders.length; await save('folders', folder); } else await DB.del('folders', tmpF[0].id);
+  for (const t of tmpT) {
+    if (keep.includes(norm(t.name))) { await DB.del('templates', t.id); continue; }
+    t.folderId = folder.id; t.order = S.data.templates.length;
+    await save('templates', t);
+  }
+  return S.data.templates.length - before;
+}
+
 async function init() {
   await DB.init();
   for (const st of ['exercises', 'workouts', 'templates', 'folders', 'measurements']) {
@@ -3423,6 +3504,7 @@ async function init() {
   }
   const saved = await DB.get('settings', 'main').catch(() => null);
   if (saved) Object.assign(S.settings, saved);
+  try { await mergeFallbackData(); } catch (e) { console.warn('Fusion des données de repli impossible', e); }
 
   // Ajoute les exercices par défaut manquants (nouvelles versions)
   const have = new Set(S.data.exercises.map(e => e.id));

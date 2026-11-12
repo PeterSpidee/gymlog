@@ -38,10 +38,27 @@ const DB = (() => {
         resolve('indexedDB');
       };
       req.onerror = useFallback;
-      // Sécurité : si IndexedDB ne répond pas (bug Safari connu), on bascule
-      setTimeout(useFallback, 4000);
+      // Mise à jour de la base bloquée par une ancienne page encore ouverte :
+      // on ATTEND (l'ancienne page ferme sa connexion via onversionchange).
+      // Basculer trop tôt sur le repli afficherait des données vides.
+      req.onblocked = () => console.warn('[DB] Mise à jour en attente d\'une ancienne connexion…');
+      // Dernier recours seulement si IndexedDB ne répond vraiment pas
+      setTimeout(useFallback, 20000);
     });
   }
+
+  /** Données éventuellement restées dans le stockage de repli (localStorage) */
+  function readFallback() {
+    const out = {};
+    let any = false;
+    STORES.forEach(st => {
+      const raw = localStorage.getItem(lsKey(st));
+      if (!raw) return;
+      try { const list = Object.values(JSON.parse(raw) || {}); if (list.length) { out[st] = list; any = true; } } catch (e) { /* ignore */ }
+    });
+    return any ? out : null;
+  }
+  function clearFallback() { STORES.forEach(st => { try { localStorage.removeItem(lsKey(st)); } catch (e) { /* ignore */ } }); }
 
   /* ---------- Repli localStorage : un objet {id: valeur} par store ---------- */
   const lsKey = store => 'gymlog:' + store;
@@ -109,7 +126,7 @@ const DB = (() => {
   }
 
   return {
-    STORES, init, getAll, get, put, putMany, del, clear,
+    STORES, init, getAll, get, put, putMany, del, clear, readFallback, clearFallback,
     get mode() { return fallback ? 'localStorage' : 'indexedDB'; }
   };
 })();
