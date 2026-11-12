@@ -117,6 +117,7 @@ const S = {
   openFolders: {},        // dossiers repliés/dépliés
   active: null,           // entraînement en cours
   statsPeriod: '30J',
+  histLimit: 40,         // nombre de séances affichées dans l'historique
   measPeriod: '3M',
   measSel: ['weight', 'waist']
 };
@@ -421,84 +422,156 @@ ACTIONS.tab = el => {
 };
 
 /* ========================== 5. ONGLET ACTIVITÉ =========================== */
+/** Pastille ronde avec les initiales (accès profil / réglages) */
+function avatarBtn() {
+  const n = (S.settings.profileName || '').trim();
+  const ini = n ? n.split(/\s+/).map(w => w[0]).join('').slice(0, 2).toUpperCase() : '';
+  return `<button class="avatar" data-action="open-settings" aria-label="Profil et réglages">${ini ? esc(ini) : svg('<circle cx="12" cy="8" r="4"/><path d="M5 21c0-3.9 3.1-7 7-7s7 3.1 7 7"/>', 2.2)}</button>`;
+}
+
+/** "AUJ. · JEU. 12 NOV.", "HIER · MER. 11 NOV.", "SAM. 3 OCT." */
+function dayLabel(k) {
+  const d = parseDayKey(k);
+  const diff = Math.round((startOfDay(Date.now()) - d) / DAY);
+  let t = `${DAYS_SHORT[d.getDay()]} ${d.getDate()} ${MONTHS_SHORT[d.getMonth()]}`.toUpperCase();
+  if (d.getFullYear() !== new Date().getFullYear()) t += ' ' + d.getFullYear();
+  return diff === 0 ? 'AUJ. · ' + t : diff === 1 ? 'HIER · ' + t : t;
+}
+
 function viewActivity() {
   const m = S.calMonth, y = m.getFullYear(), mo = m.getMonth();
   const byDay = {};
   for (const w of S.data.workouts) (byDay[dayKey(w.startTime)] ||= []).push(w);
+  const now = new Date();
+  const today = dayKey(now);
+  const isCurMonth = y === now.getFullYear() && mo === now.getMonth();
 
-  // Grille du calendrier (semaine commençant le lundi)
-  const offset = (new Date(y, mo, 1).getDay() + 6) % 7;
-  const nDays = new Date(y, mo + 1, 0).getDate();
-  const today = dayKey(new Date());
+  // Grille complète : du lundi de la 1re semaine au dimanche de la dernière
+  // (les jours des mois voisins sont affichés en grisé, avec leurs points)
+  const end = addDays(startOfWeek(new Date(y, mo + 1, 0)), 6);
   let cells = '';
-  for (let i = 0; i < offset; i++) cells += '<div class="cal-cell empty"></div>';
-  for (let d = 1; d <= nDays; d++) {
-    const k = dayKey(new Date(y, mo, d));
+  for (let d = startOfWeek(new Date(y, mo, 1)); d <= end; d = addDays(d, 1)) {
+    const k = dayKey(d);
     const n = (byDay[k] || []).length;
-    const future = k > today;
-    cells += `<button class="cal-cell ${k === today ? 'today' : ''} ${S.selDay === k ? 'sel' : ''} ${future ? 'future' : ''}" data-action="cal-day" data-day="${k}">
-      <span class="cal-num">${d}</span><span class="cal-dots">${'<i></i>'.repeat(Math.min(n, 3))}</span></button>`;
+    cells += `<button class="cal-cell ${k === today ? 'today' : ''} ${S.selDay === k ? 'sel' : ''} ${d.getMonth() !== mo ? 'out' : ''}" data-action="cal-day" data-day="${k}">
+      <span class="cal-num">${d.getDate()}</span><span class="cal-dots">${'<i></i>'.repeat(Math.min(n, 3))}</span></button>`;
   }
 
   // Statistiques rapides
-  const now = Date.now();
   const wkStart = startOfWeek(now).getTime();
-  const moStart = new Date(new Date().getFullYear(), new Date().getMonth(), 1).getTime();
+  const moStart = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
   const thisWeek = S.data.workouts.filter(w => w.startTime >= wkStart).length;
   const thisMonth = S.data.workouts.filter(w => w.startTime >= moStart).length;
-  const pr30 = S.data.workouts.filter(w => w.startTime >= now - 30 * DAY).reduce((a, w) => a + wStats(w).pr, 0);
+  const pr30 = S.data.workouts.filter(w => w.startTime >= Date.now() - 30 * DAY).reduce((a, w) => a + wStats(w).pr, 0);
 
-  // Liste : jour sélectionné ou mois affiché
+  // Historique continu, groupé par jour (ou un seul jour si sélectionné)
   let list = workoutsDesc();
-  let listTitle;
-  if (S.selDay) {
-    list = list.filter(w => dayKey(w.startTime) === S.selDay);
-    listTitle = fmtDateLong(parseDayKey(S.selDay));
-  } else {
-    list = list.filter(w => { const d = new Date(w.startTime); return d.getFullYear() === y && d.getMonth() === mo; });
-    listTitle = `${MONTHS[mo]} ${y}`;
+  if (S.selDay) list = list.filter(w => dayKey(w.startTime) === S.selDay);
+  const shown = list.slice(0, S.histLimit);
+  const groups = [];
+  for (const w of shown) {
+    const k = dayKey(w.startTime);
+    if (!groups.length || groups[groups.length - 1].k !== k) groups.push({ k, ws: [] });
+    groups[groups.length - 1].ws.push(w);
   }
+  const hist = groups.map(g => `
+    <div class="day-head"><h3>${dayLabel(g.k)}</h3><span class="mono-sm">${g.ws.length} entraînement${g.ws.length > 1 ? 's' : ''}</span></div>
+    ${g.ws.map(workoutCard).join('')}`).join('');
 
   return `
-    <header class="big-head"><h1>Activité</h1></header>
-    <div class="card cal-card">
-      <div class="cal-head">
-        <button class="icon-btn" data-action="cal-prev" aria-label="Mois précédent">${ICON.chevL}</button>
-        <h3>${MONTHS[mo]} ${y}</h3>
-        <button class="icon-btn" data-action="cal-next" aria-label="Mois suivant">${ICON.chevR}</button>
-      </div>
+    <header class="act-head">
+      <button class="icon-btn sm" data-action="cal-prev" aria-label="Mois précédent">${ICON.chevL}</button>
+      <h1 class="act-title">${MONTHS[mo]} <small>${y}</small></h1>
+      ${!isCurMonth || S.selDay ? `<button class="today-pill" data-action="cal-today">Aujourd'hui</button>` : ''}
+      <button class="icon-btn sm green" data-action="log-past" aria-label="Ajouter un entraînement passé">${ICON.plus}</button>
+      <button class="icon-btn sm" data-action="cal-next" aria-label="Mois suivant">${ICON.chevR}</button>
+      ${avatarBtn()}
+    </header>
+    <div class="cal-plain">
       <div class="cal-grid cal-wd">${['L', 'M', 'M', 'J', 'V', 'S', 'D'].map(d => `<span>${d}</span>`).join('')}</div>
       <div class="cal-grid">${cells}</div>
     </div>
     <div class="quick-stats">
-      <div class="qs"><b>${thisWeek}</b><span>cette semaine</span></div>
-      <div class="qs"><b>${thisMonth}</b><span>ce mois</span></div>
-      <div class="qs"><b>${pr30}</b><span>PR 30 jours</span></div>
+      <div class="qs"><b>${thisWeek}</b><span>CETTE SEMAINE</span></div>
+      <div class="qs"><b>${thisMonth}</b><span>CE MOIS</span></div>
+      <div class="qs pr"><b>${pr30}<small>PR</small></b><span>30 JOURS</span></div>
     </div>
-    <div class="section-head"><h2>${esc(listTitle)}</h2>${S.selDay ? '<button class="link-btn" data-action="cal-clear">Tout le mois</button>' : `<span class="muted">${list.length} séance${list.length > 1 ? 's' : ''}</span>`}</div>
-    ${list.length ? list.map(workoutCard).join('') : emptyState(ICON.clock || ICON.timer, S.data.workouts.length ? 'Aucun entraînement sur cette période.' : 'Aucun entraînement pour le moment.', S.data.workouts.length ? '' : '<button class="btn-primary inline" data-action="tab" data-tab="seances">Démarrer une séance</button>')}`;
+    ${S.selDay ? `<div class="sel-bar"><span>${list.length} entraînement${list.length > 1 ? 's' : ''} ce jour-là</span><button class="link-btn" data-action="cal-clear">Tout l'historique</button></div>` : ''}
+    ${list.length ? hist : emptyState(ICON.timer, S.selDay ? 'Aucun entraînement ce jour-là.' : 'Aucun entraînement pour le moment.', S.selDay ? '' : '<button class="btn-primary inline" data-action="tab" data-tab="seances">Démarrer une séance</button>')}
+    ${list.length > shown.length ? `<button class="btn-plain" data-action="hist-more">Voir plus (${list.length - shown.length})</button>` : ''}`;
 }
 
 function emptyState(icon, text, extra = '') {
   return `<div class="empty"><div class="empty-ic">${icon || ICON.timer}</div><p>${text}</p>${extra}</div>`;
 }
 
+/** Carte compacte d'un entraînement (historique) */
 function workoutCard(w) {
   const st = wStats(w);
-  return `<div class="card w-card tap" data-action="open-workout" data-id="${w.id}">
-    <div class="w-card-top"><h3>${esc(w.name)}</h3>${st.pr ? `<span class="pr-badge">${ICON.trophy}+${st.pr} PR</span>` : ''}</div>
-    <p class="muted sm">${fmtDateLong(w.startTime)} · ${fmtHour(w.startTime)} → ${fmtHour(w.endTime)}</p>
-    <div class="mini-stats">
-      <div><b>${fmtDur(w.duration)}</b><span>Durée</span></div>
-      <div><b>${st.sets}</b><span>Séries</span></div>
-      <div><b>${fmtVol(st.volume)}</b><span>Volume</span></div>
-    </div></div>`;
+  return `<button class="w-row tap" data-action="open-workout" data-id="${w.id}">
+    <span class="w-bar"></span>
+    <span class="w-row-main">
+      <span class="w-row-top"><b>${esc(w.name)}</b>${st.pr ? `<span class="pr-pill">+${st.pr} PR</span>` : ''}</span>
+      <span class="w-row-meta"><span class="mono">${fmtHour(w.startTime)} → ${fmtHour(w.endTime)}</span> · ${fmtDur(w.duration)} · ${st.sets} série${st.sets > 1 ? 's' : ''} · ${fmtNum(st.volume)} ${unit()}</span>
+    </span>
+  </button>`;
 }
 
-ACTIONS['cal-prev'] = () => { S.calMonth = new Date(S.calMonth.getFullYear(), S.calMonth.getMonth() - 1, 1); S.selDay = null; renderTab(); };
-ACTIONS['cal-next'] = () => { S.calMonth = new Date(S.calMonth.getFullYear(), S.calMonth.getMonth() + 1, 1); S.selDay = null; renderTab(); };
-ACTIONS['cal-day'] = el => { S.selDay = S.selDay === el.dataset.day ? null : el.dataset.day; renderTab(); };
+ACTIONS['cal-prev'] = () => { S.calMonth = new Date(S.calMonth.getFullYear(), S.calMonth.getMonth() - 1, 1); renderTab(); };
+ACTIONS['cal-next'] = () => { S.calMonth = new Date(S.calMonth.getFullYear(), S.calMonth.getMonth() + 1, 1); renderTab(); };
+ACTIONS['cal-today'] = () => { S.calMonth = new Date(new Date().getFullYear(), new Date().getMonth(), 1); S.selDay = null; S.histLimit = 40; renderTab(); $('#views').scrollTo({ top: 0, behavior: 'smooth' }); };
+ACTIONS['cal-day'] = el => {
+  const k = el.dataset.day;
+  S.selDay = S.selDay === k ? null : k;
+  const d = parseDayKey(k);
+  if (d.getMonth() !== S.calMonth.getMonth()) S.calMonth = new Date(d.getFullYear(), d.getMonth(), 1);
+  renderTab();
+};
 ACTIONS['cal-clear'] = () => { S.selDay = null; renderTab(); };
+ACTIONS['hist-more'] = () => { S.histLimit += 40; renderTab(); };
+
+/** « + » : saisir après coup un entraînement fait sans l'app */
+ACTIONS['log-past'] = () => {
+  const tpls = [...S.data.templates].sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || a.name.localeCompare(b.name, 'fr'));
+  const d = { tpl: '', name: 'Entraînement libre', date: S.selDay && S.selDay <= dayKey(Date.now()) ? S.selDay : dayKey(Date.now()), time: '18:00', dur: 60 };
+  const sh = openSheet({
+    html: `<div class="dialog left"><h3>Ajouter un entraînement passé</h3>
+      <p class="muted sm" style="text-align:center">Pour une séance faite sans l'app : tu saisiras ensuite tes séries.</p>
+      <label class="lbl">Séance</label>
+      <select class="field" data-input="lp-tpl"><option value="">Entraînement libre</option>${tpls.map(t => `<option value="${t.id}">${esc(t.name)}</option>`).join('')}</select>
+      <label class="lbl">Nom</label><input class="field" id="lp-name" data-input="lp-name" value="${esc(d.name)}" autocomplete="off">
+      <div class="row2">
+        <div><label class="lbl">Date</label><input class="field" type="date" data-input="lp-date" value="${d.date}" max="${dayKey(Date.now())}"></div>
+        <div><label class="lbl">Début</label><input class="field" type="time" data-input="lp-time" value="${d.time}"></div>
+      </div>
+      <label class="lbl">Durée (minutes)</label><input class="field" inputmode="numeric" data-input="lp-dur" value="${d.dur}">
+      <button class="btn-primary" data-action="lp-go">Saisir les séries</button>
+      <button class="btn-plain" data-action="sheet-close">Annuler</button></div>`,
+    inputs: {
+      'lp-tpl': el => { d.tpl = el.value; const t = tpls.find(x => x.id === d.tpl); d.name = t ? t.name : 'Entraînement libre'; $('#lp-name', sh.el).value = d.name; },
+      'lp-name': el => { d.name = el.value; },
+      'lp-date': el => { d.date = el.value; },
+      'lp-time': el => { d.time = el.value; },
+      'lp-dur': el => { d.dur = parseInt(el.value, 10) || 0; }
+    },
+    actions: {
+      'lp-go': () => {
+        if (!d.date) { toast('Choisis une date'); return; }
+        const [hh, mm] = (d.time || '18:00').split(':').map(Number);
+        const start = parseDayKey(d.date); start.setHours(hh || 0, mm || 0, 0, 0);
+        if (start.getTime() > Date.now()) { toast('La date doit être dans le passé'); return; }
+        if (d.dur < 1 || d.dur > 600) { toast('Indique une durée en minutes'); return; }
+        const t = tpls.find(x => x.id === d.tpl);
+        sh.close();
+        startWorkout({
+          name: d.name.trim() || 'Entraînement libre', templateId: t ? t.id : null,
+          startTime: start.getTime(), manual: true, durationMin: d.dur,
+          exercises: t ? t.exercises.map(e => ({ exerciseId: e.exerciseId, restTime: e.restTime, tempo: e.tempo, targetReps: e.targetReps, nSets: e.targetSets || 3 })) : []
+        });
+      }
+    }
+  });
+};
 ACTIONS['open-workout'] = el => openWorkoutDetail(el.dataset.id);
 
 /** Détail d'un entraînement passé */
@@ -567,7 +640,7 @@ function viewSeances() {
 
   let html = `
     <header class="big-head"><h1>Séances</h1>
-      <button class="round-btn" data-action="new-template" aria-label="Nouvelle séance">${ICON.plus}</button></header>
+      <span class="head-actions"><button class="round-btn" data-action="new-template" aria-label="Nouvelle séance">${ICON.plus}</button>${avatarBtn()}</span></header>
     <div class="card free-card">
       <div><h3>Entraînement libre</h3><p class="muted sm">Démarre une séance vide et ajoute tes exercices au fil de l'eau.</p></div>
       <button class="btn-start" data-action="start-free">${ICON.play}<span>Démarrer</span></button>
@@ -922,7 +995,8 @@ async function startWorkout(spec) {
   unlockAudio();
   S.active = {
     id: uid(), name: spec.name, templateId: spec.templateId || null,
-    startTime: Date.now(), minimized: false, rest: null,
+    startTime: spec.startTime || Date.now(), minimized: false, rest: null,
+    manual: !!spec.manual, durationMin: spec.durationMin || null,
     exercises: spec.exercises.filter(e => EX.has(e.exerciseId)).map(e => ({
       exerciseId: e.exerciseId,
       restTime: e.restTime ?? S.settings.restTimerDefault,
@@ -934,7 +1008,7 @@ async function startWorkout(spec) {
   persistActive();
   while (pages.length) popPage();
   renderWorkout(true);
-  requestNotifPermission();
+  if (!spec.manual) requestNotifPermission();
 }
 
 /** Valeurs "fantômes" proposées pour une série (précédente séance ou série du dessus) */
@@ -958,11 +1032,11 @@ function renderWorkout(animateOpen = false) {
       <header class="w-head">
         <div class="w-top">
           <button class="icon-btn" data-action="w-minimize" aria-label="Réduire">${ICON.minimize}</button>
-          <div class="w-title"><span class="live"><i></i>LIVE</span><h2 data-action="w-rename">${esc(a.name)}</h2></div>
+          <div class="w-title">${a.manual ? `<span class="live manual">SAISIE · ${fmtDateShort(a.startTime).toUpperCase()}</span>` : '<span class="live"><i></i>LIVE</span>'}<h2 data-action="w-rename">${esc(a.name)}</h2></div>
           <button class="btn-finish" data-action="w-finish">Terminer</button>
         </div>
         <div class="w-stats">
-          <div><b id="w-elapsed">${fmtClock((Date.now() - a.startTime) / 1000)}</b><span>Durée</span></div>
+          <div>${a.manual ? `<b>${fmtDur(a.durationMin * 60)}</b>` : `<b id="w-elapsed">${fmtClock((Date.now() - a.startTime) / 1000)}</b>`}<span>Durée</span></div>
           <div><b id="w-volume">${fmtNum(st.volume)} ${unit()}</b><span>Volume</span></div>
           <div><b id="w-sets">${st.sets} / ${st.total}</b><span>Séries</span></div>
         </div>
@@ -1069,7 +1143,7 @@ ACTIONS['w-check'] = el => {
     vibrate(12);
     const rec = recomputeRecords(ex);
     if (rec === s) { toast('🏆 Nouveau record !'); vibrate([30, 60, 30]); }
-    if (ex.restTime > 0) startRest(ex.restTime, exIdx, setIdx);
+    if (ex.restTime > 0 && !a.manual) startRest(ex.restTime, exIdx, setIdx);
   }
   persistActive();
   renderWorkout();
@@ -1140,7 +1214,7 @@ function renderMiniBar() {
   const show = a && a.minimized;
   document.body.classList.toggle('has-mini', !!show);
   if (!show) { bar.classList.remove('show'); return; }
-  bar.innerHTML = `<span class="live"><i></i>LIVE</span><b>${esc(a.name)}</b><span id="mini-time">${fmtClock((Date.now() - a.startTime) / 1000)}</span>
+  bar.innerHTML = `<span class="live"><i></i>LIVE</span><b>${esc(a.name)}</b><span id="mini-time">${a.manual ? fmtDateShort(a.startTime) : fmtClock((Date.now() - a.startTime) / 1000)}</span>
     <span id="mini-rest" class="mini-rest">${a.rest ? fmtClock(Math.ceil((a.rest.endAt - Date.now()) / 1000)) : ''}</span>${ICON.chevD.replace('<svg', '<svg class="up"')}`;
   bar.classList.add('show');
 }
@@ -1217,7 +1291,7 @@ function updateRestUI() {
 function tick() {
   const a = S.active; if (!a) return;
   const el = $('#w-elapsed'); if (el) el.textContent = fmtClock((Date.now() - a.startTime) / 1000);
-  const mt = $('#mini-time'); if (mt) mt.textContent = fmtClock((Date.now() - a.startTime) / 1000);
+  const mt = !a.manual && $('#mini-time'); if (mt) mt.textContent = fmtClock((Date.now() - a.startTime) / 1000);
   if (a.rest) {
     const rem = (a.rest.endAt - Date.now()) / 1000;
     if (rem <= 0 && !a.rest.done) { a.rest.done = true; persistActive(); restFinished(); }
@@ -1319,7 +1393,7 @@ ACTIONS['w-finish'] = async () => {
 
 async function saveWorkout({ name, makeTemplate }) {
   const a = S.active;
-  const end = Date.now();
+  const end = a.manual ? a.startTime + a.durationMin * 60000 : Date.now();
   const w = {
     id: a.id, name: (name || '').trim() || a.name, templateId: a.templateId,
     date: dayKey(a.startTime), startTime: a.startTime, endTime: end,
@@ -1340,7 +1414,8 @@ async function saveWorkout({ name, makeTemplate }) {
   S.active = null; persistActive();
   renderWorkout();
   S.tab = 'activity'; S.selDay = null;
-  S.calMonth = new Date(new Date().getFullYear(), new Date().getMonth(), 1);
+  S.calMonth = new Date(new Date(w.startTime).getFullYear(), new Date(w.startTime).getMonth(), 1);
+  if (a.manual) await recomputeAllRecords(); // une séance passée peut changer les records suivants
   refreshAll();
   showSummary(w);
 }
@@ -1448,7 +1523,7 @@ function viewProgress() {
 
   return `
     <header class="big-head"><h1>Progrès</h1>
-      <button class="round-btn ghost" data-action="open-settings" aria-label="Réglages">${ICON.gear}</button></header>
+      ${avatarBtn()}</header>
 
     <div class="card streak-card">
       <div class="streak-top">
@@ -1675,6 +1750,10 @@ ACTIONS['open-settings'] = () => {
       const perm = 'Notification' in window ? Notification.permission : 'unsupported';
       const permTxt = { granted: 'Activées', denied: 'Refusées (réglages iOS)', default: 'Activer', unsupported: 'Non supportées' }[perm];
       return `
+        <div class="section-head"><h2>Profil</h2></div>
+        <div class="card list-card">
+          <label class="set-row-btn"><span>Ton prénom</span><input class="inline-in" data-input="s-name" value="${esc(S.settings.profileName || '')}" placeholder="Ex. : Alex" autocomplete="given-name"></label>
+        </div>
         <div class="section-head"><h2>Entraînement</h2></div>
         <div class="card list-card">
           <button class="set-row-btn" data-action="s-rest"><span>Repos par défaut</span><b>${fmtClock(S.settings.restTimerDefault)}</b>${ICON.chevR}</button>
@@ -1698,6 +1777,7 @@ ACTIONS['open-settings'] = () => {
         <p class="muted sm pad">Astuce iPhone : dans Safari, touche Partager puis « Sur l'écran d'accueil » pour installer GymLog en plein écran.</p>`;
     },
     inputs: {
+      's-name': async el => { S.settings.profileName = el.value; await saveSettings(); renderTab(); },
       's-goal': async el => { S.settings.weeklyGoal = +el.value; await saveSettings(); renderTab(); },
       's-units': async el => { S.settings.units = el.value; await saveSettings(); refreshAll(); }
     },
