@@ -4,7 +4,7 @@
    puis on sert depuis le cache (cache-first) avec mise à jour en arrière-plan.
    Incrémenter CACHE_VERSION à chaque déploiement pour forcer la mise à jour.
    ========================================================================== */
-const CACHE_VERSION = 'gymlog-v1';
+const CACHE_VERSION = 'gymlog-v2';
 const ASSETS = [
   './',
   './index.html',
@@ -12,6 +12,7 @@ const ASSETS = [
   './app.js',
   './db.js',
   './exercises.js',
+  './body.js',
   './manifest.json',
   './icons/icon.svg',
   './icons/icon-180.png',

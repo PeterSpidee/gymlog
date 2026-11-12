@@ -25,7 +25,8 @@
   --blur-bg: rgba(255, 255, 255, .82);
   --backdrop: rgba(0, 0, 0, .32);
   /* Échelle d'intensité (silhouette, heatmap) */
-  --l0: #E5E5EA; --l1: #C9F0D3; --l2: #95E2A8; --l3: #5BD27B; --l4: #34C759; --l5: #1E8E3E;
+  --l0: #E5E5EA; --l1: #CDEFD8; --l2: #A6E4BA; --l3: #7DD89B; --l4: #55CB7E; --l5: #2FB964;
+  --body-skin: #CFCFD3; --body-muscle: #BDBDC2; --body-line: #F2F2F4; --body-hair: #6B6B70;
   --radius: 16px;
   --tab-h: 56px;
   --sat: env(safe-area-inset-top, 0px);
@@ -41,6 +42,7 @@
     --gold-soft: #3A2A0B; --shadow: none; --shadow-up: 0 -6px 24px rgba(0, 0, 0, .5);
     --blur-bg: rgba(18, 18, 18, .82); --backdrop: rgba(0, 0, 0, .6);
     --l0: #2C2C2E; --l1: #134A22; --l2: #1C6E33; --l3: #239A45; --l4: #30D158; --l5: #7CEB98;
+    --body-skin: #48484C; --body-muscle: #3A3A3E; --body-line: #1C1C1E; --body-hair: #8E8E93;
     color-scheme: dark;
   }
 }
@@ -51,6 +53,7 @@
   --gold-soft: #3A2A0B; --shadow: none; --shadow-up: 0 -6px 24px rgba(0, 0, 0, .5);
   --blur-bg: rgba(18, 18, 18, .82); --backdrop: rgba(0, 0, 0, .6);
   --l0: #2C2C2E; --l1: #134A22; --l2: #1C6E33; --l3: #239A45; --l4: #30D158; --l5: #7CEB98;
+    --body-skin: #48484C; --body-muscle: #3A3A3E; --body-line: #1C1C1E; --body-hair: #8E8E93;
   color-scheme: dark;
 }
 
@@ -420,10 +423,14 @@ input[type="date"].field { display: flex; align-items: center; }
 .body-maps { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .body-maps figure { margin: 0; text-align: center; }
 .body-maps figcaption { font-size: 12px; color: var(--text-2); font-weight: 600; margin-top: 4px; }
-.body-svg { width: 100%; max-width: 150px; height: auto; margin: 0 auto; }
-.mz-base { fill: var(--l0); opacity: .7; }
-.mz { stroke: var(--card); stroke-width: .8; transition: fill .4s ease; }
-.mz.l0 { fill: var(--l0); } .mz.l1 { fill: var(--l1); } .mz.l2 { fill: var(--l2); } .mz.l3 { fill: var(--l3); } .mz.l4 { fill: var(--l4); } .mz.l5 { fill: var(--l5); }
+.body-svg { width: 100%; max-width: 150px; height: auto; margin: 0 auto; overflow: visible; }
+/* Silhouette anatomique : peau grise, muscles séparés par des traits clairs */
+.bd-skin { fill: var(--body-skin); stroke: var(--body-line); stroke-width: .5; }
+.bd-hair { fill: var(--body-hair); }
+.bd-line { fill: none; stroke: var(--body-line); stroke-width: .5; stroke-linecap: round; }
+.bd-joint { fill: none; stroke: var(--body-line); stroke-width: .5; }
+.mz { stroke: var(--body-line); stroke-width: .55; stroke-linejoin: round; transition: fill .4s ease; }
+.mz.l0 { fill: var(--body-muscle); } .mz.l1 { fill: var(--l1); } .mz.l2 { fill: var(--l2); } .mz.l3 { fill: var(--l3); } .mz.l4 { fill: var(--l4); } .mz.l5 { fill: var(--l5); }
 .legend { display: flex; align-items: center; justify-content: center; gap: 4px; margin: 12px 0 4px; font-size: 11px; color: var(--text-2); }
 .legend .lv { width: 16px; height: 10px; border-radius: 3px; }
 .lv.l1 { background: var(--l1); } .lv.l2 { background: var(--l2); } .lv.l3 { background: var(--l3); } .lv.l4 { background: var(--l4); } .lv.l5 { background: var(--l5); }
@@ -560,3 +567,49 @@ input[type="date"].field { display: flex; align-items: center; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
 }
+
+/* ---------- Résumé « Entraînement terminé » ---------- */
+#summary-root { position: fixed; inset: 0; z-index: 40; pointer-events: none; opacity: 0; transform: scale(.98); transition: opacity .35s ease, transform .4s var(--ease); }
+#summary-root.open { opacity: 1; transform: none; pointer-events: auto; }
+#summary-root:empty { display: none; }
+.sum-screen { position: absolute; inset: 0; overflow-y: auto; -webkit-overflow-scrolling: touch;
+  background: radial-gradient(120% 40% at 50% 0%, var(--sum-glow) 0%, transparent 70%), var(--sum-bg); }
+:root { --sum-bg: #F4F5F4; --sum-glow: #DDF5E5; --sum-card: #FFFFFF; --sum-green: #00B259; }
+:root[data-theme="dark"] { --sum-bg: #000; --sum-glow: #0E2E19; --sum-card: #1C1C1E; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --sum-bg: #000; --sum-glow: #0E2E19; --sum-card: #1C1C1E; } }
+.sum-body { max-width: 480px; margin: 0 auto; padding: calc(var(--sat) + 40px) 20px calc(var(--sab) + 24px); text-align: center; }
+.sum-kicker { font-family: ui-monospace, "SF Mono", Menlo, monospace; color: var(--sum-green); font-size: 14px; font-weight: 600; letter-spacing: 2.5px; }
+.sum-badge { position: relative; width: 112px; height: 112px; margin: 28px auto 30px; }
+.sum-badge > span { position: absolute; inset: 0; border-radius: 50%; background: var(--sum-green); color: #fff; display: grid; place-items: center;
+  box-shadow: 0 0 0 14px rgba(0, 178, 89, .07), 0 10px 40px rgba(0, 178, 89, .35); animation: sumPop .6s cubic-bezier(.2, 1.4, .4, 1) both; }
+.sum-badge > span svg { width: 46px; height: 46px; stroke-width: 3.4; }
+@keyframes sumPop { from { transform: scale(.3); opacity: 0; } to { transform: none; opacity: 1; } }
+.sum-confetti i { position: absolute; left: 50%; top: 50%; width: 7px; height: 7px; border-radius: 50%; background: var(--c); opacity: 0;
+  animation: confetti 1.1s ease-out var(--dl) forwards; }
+@keyframes confetti { 0% { transform: translate(-50%, -50%) scale(.4); opacity: 1; } 70% { opacity: 1; } 100% { transform: translate(calc(-50% + var(--x)), calc(-50% + var(--y) + 30px)) scale(1); opacity: 0; } }
+.sum-title { font-family: "Avenir Next Condensed", "AvenirNextCondensed-Bold", "Arial Narrow", sans-serif; font-weight: 700; font-size: 34px; letter-spacing: -.4px; line-height: 1.1; }
+.sum-date { color: var(--text-2); font-size: 16px; margin-top: 6px; }
+.sum-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 26px 0 18px; text-align: left; }
+.sum-stat { background: var(--sum-card); border-radius: 16px; padding: 16px 12px 14px; box-shadow: 0 1px 2px rgba(0, 0, 0, .04), 0 0 0 .5px var(--line); }
+.sum-stat b { display: block; font-family: "Avenir Next Condensed", "AvenirNextCondensed-Bold", "Arial Narrow", sans-serif; font-weight: 700; font-size: 30px; letter-spacing: -.5px; line-height: 1.1; white-space: nowrap; }
+.sum-stat small { font-family: -apple-system, BlinkMacSystemFont, sans-serif; font-weight: 400; font-size: 14px; color: var(--text-2); letter-spacing: 0; }
+.sum-stat > span { display: block; margin-top: 8px; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11px; letter-spacing: 1.5px; color: var(--text-2); }
+.sum-card { background: var(--sum-card); border-radius: 22px; padding: 18px 16px; margin-bottom: 14px; text-align: left; box-shadow: 0 1px 2px rgba(0, 0, 0, .04), 0 0 0 .5px var(--line); }
+.sum-card-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 12px; }
+.sum-card-head h3 { font-size: 18px; font-weight: 600; }
+.sum-card-head span { font-size: 12px; letter-spacing: .8px; color: var(--text-2); }
+.sum-maps { gap: 0; }
+.sum-maps .body-svg { max-width: 140px; }
+.sum-maps figcaption { font-size: 11px; letter-spacing: 1.5px; margin-top: 10px; }
+.sum-legend { display: flex; align-items: center; justify-content: center; gap: 10px; margin: 18px 0 14px; font-size: 13px; color: var(--text-2); }
+.sum-legend i { width: 90px; height: 5px; border-radius: 3px; background: linear-gradient(90deg, var(--body-muscle), var(--l2), var(--sum-green)); }
+.sum-foot { display: flex; justify-content: space-between; gap: 10px; font-size: 13px; color: var(--text-2); }
+.sum-foot span:first-child { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sum-foot span:last-child { white-space: nowrap; }
+.sum-body .btn-primary { background: var(--sum-green); margin-top: 8px; }
+.sum-body .btn-plain { color: var(--sum-green); }
+.sum-rec { display: flex; align-items: center; gap: 10px; padding: 10px 0; border-top: .5px solid var(--line); font-size: 15px; }
+.sum-rec svg { width: 18px; height: 18px; color: var(--gold); flex-shrink: 0; }
+.sum-rec span { flex: 1; }
+.sum-rec b { color: var(--gold); font-variant-numeric: tabular-nums; }
+@media (max-width: 360px) { .sum-stat b { font-size: 25px; } }

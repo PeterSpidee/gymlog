@@ -527,10 +527,12 @@ function openWorkoutDetail(id) {
             <div class="hist-sets">${sets.map((s, i) => `<div class="hist-set ${s.isRecord ? 'rec' : ''}"><span class="n">${i + 1}</span><span>${fmtNum(s.weight, 2)} ${unit()} × ${s.reps}</span><span class="muted sm">1RM ${fmtNum(e1rm(s.weight, s.reps), 1)}</span>${s.isRecord ? '<span class="rec-badge">RECORD</span>' : ''}</div>`).join('')}</div>
           </div>`;
         }).join('')}
+        <button class="btn-soft wide" data-action="summary">${ICON.check}<span>Voir le résumé</span></button>
         <button class="btn-primary" data-action="repeat">${ICON.play} Refaire cette séance</button>
         <button class="btn-plain danger" data-action="del">Supprimer la séance</button>`;
     },
     actions: {
+      summary: () => { const w = S.data.workouts.find(x => x.id === id); w && showSummary(w); },
       repeat: () => {
         const w = S.data.workouts.find(x => x.id === id);
         startWorkout({
@@ -1296,24 +1298,15 @@ ACTIONS['w-finish'] = async () => {
     if (await confirmSheet('Aucune série validée', 'Valide au moins une série pour enregistrer la séance. Abandonner ?', 'Abandonner la séance', true)) { stopRest(); S.active = null; persistActive(); renderWorkout(); }
     return;
   }
-  const duration = Math.round((Date.now() - a.startTime) / 1000);
-  const records = a.exercises.flatMap(ex => ex.sets.filter(s => s.isRecord && s.completed).map(s => ({ ex, s })));
   const pending = st.total - st.sets;
   const opt = { makeTemplate: false, name: a.name };
   const sh = openSheet({
-    html: `<div class="dialog summary">
-      <div class="sum-check">${ICON.check}</div>
-      <h3>Bravo, séance terminée !</h3>
+    html: `<div class="dialog">
+      <h3>Terminer l'entraînement ?</h3>
       <input class="field center" data-input="sum-name" value="${esc(a.name)}" aria-label="Nom de la séance">
-      <div class="mini-stats big">
-        <div><b>${fmtDur(duration)}</b><span>Durée</span></div>
-        <div><b>${st.sets}</b><span>Séries</span></div>
-        <div><b>${fmtVol(st.volume)}</b><span>Volume</span></div>
-      </div>
-      ${records.length ? `<div class="sum-recs"><h4>${ICON.trophy} ${records.length} record${records.length > 1 ? 's' : ''}</h4>${records.map(r => `<div>${esc(exName(r.ex.exerciseId))} — <b>${fmtNum(r.s.weight, 2)} ${unit()} × ${r.s.reps}</b></div>`).join('')}</div>` : ''}
       ${pending ? `<p class="muted sm">${pending} série${pending > 1 ? 's' : ''} non validée${pending > 1 ? 's' : ''} ne ser${pending > 1 ? 'ont' : 'a'} pas enregistrée${pending > 1 ? 's' : ''}.</p>` : ''}
       ${!a.templateId ? `<button class="toggle-row" data-action="sum-tpl"><span class="tgl"></span><span>Enregistrer aussi comme séance type</span></button>` : ''}
-      <button class="btn-primary" data-action="sum-save">Enregistrer</button>
+      <button class="btn-primary" data-action="sum-save">${ICON.check} Terminer</button>
       <button class="btn-plain" data-action="sheet-close">Reprendre la séance</button>
     </div>`,
     inputs: { 'sum-name': el => { opt.name = el.value; } },
@@ -1331,6 +1324,7 @@ async function saveWorkout({ name, makeTemplate }) {
     id: a.id, name: (name || '').trim() || a.name, templateId: a.templateId,
     date: dayKey(a.startTime), startTime: a.startTime, endTime: end,
     duration: Math.round((end - a.startTime) / 1000),
+    plannedSets: wStats(a).total,
     exercises: a.exercises
       .map(ex => ({ exerciseId: ex.exerciseId, restTime: ex.restTime, tempo: ex.tempo, sets: ex.sets.filter(s => s.completed).map((s, k) => ({ ...s, setNumber: k + 1 })) }))
       .filter(ex => ex.sets.length)
@@ -1348,8 +1342,73 @@ async function saveWorkout({ name, makeTemplate }) {
   S.tab = 'activity'; S.selDay = null;
   S.calMonth = new Date(new Date().getFullYear(), new Date().getMonth(), 1);
   refreshAll();
-  toast('Séance enregistrée 💪');
+  showSummary(w);
 }
+
+/* ----- Écran « Entraînement terminé » ----- */
+const DAYS_LONG = ['dimanche', 'lundi', 'mardi', 'mercredi', 'jeudi', 'vendredi', 'samedi'];
+/** Intensité pour une seule séance (seuils plus bas que sur 7 jours) */
+const sessionLevel = n => n <= 0 ? 0 : n < 2 ? 1 : n < 4 ? 2 : n < 6 ? 3 : n < 9 ? 4 : 5;
+
+function showSummary(w) {
+  const st = wStats(w);
+  const planned = Math.max(w.plannedSets || 0, st.sets);
+  const min = Math.round((w.duration || 0) / 60);
+  const dur = `${Math.floor(min / 60)}:${pad(min % 60)}`;
+  const vol = st.volume >= 1000 ? [fmtNum(st.volume / 1000, 1), 'tonnes'] : [fmtNum(st.volume), unit()];
+  const d = new Date(w.startTime);
+  const date = `${DAYS_LONG[d.getDay()]} ${d.getDate()} ${MONTHS[d.getMonth()].toLowerCase()} ${d.getFullYear()}`;
+  const ms = muscleSets([w]);
+  const lv = Object.fromEntries(Object.keys(MUSCLES).map(m => [m, sessionLevel(ms[m] || 0)]));
+  const top = Object.entries(ms).filter(([, n]) => n >= 1).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([m]) => MUSCLES[m]).join(' · ');
+  const recs = w.exercises.flatMap(ex => ex.sets.filter(s => s.isRecord).map(s => ({ ex, s })));
+  const confetti = Array.from({ length: 16 }, (_, i) => {
+    const ang = (i / 16) * Math.PI * 2, r = 70 + (i % 3) * 22;
+    const col = ['#FFCC00', '#34C759', '#FF9F0A', '#5AC8FA'][i % 4];
+    return `<i style="--x:${Math.cos(ang) * r}px;--y:${Math.sin(ang) * r}px;--c:${col};--dl:${(i % 4) * 40}ms"></i>`;
+  }).join('');
+
+  const root = $('#summary-root');
+  root.innerHTML = `
+    <div class="sum-screen">
+      <div class="sum-body">
+        <p class="sum-kicker">✓ ENTRAÎNEMENT TERMINÉ</p>
+        <div class="sum-badge"><div class="sum-confetti">${confetti}</div><span>${ICON.check}</span></div>
+        <h1 class="sum-title">${esc(w.name)}</h1>
+        <p class="sum-date">${date}</p>
+        <div class="sum-stats">
+          <div class="sum-stat"><b>${dur}</b><span>DURÉE</span></div>
+          <div class="sum-stat"><b>${vol[0]}<small> ${vol[1]}</small></b><span>VOLUME</span></div>
+          <div class="sum-stat"><b>${st.sets}<small> / ${planned}</small></b><span>SÉRIES</span></div>
+        </div>
+        <div class="sum-card">
+          <div class="sum-card-head"><h3>Muscles travaillés</h3><span>CETTE SÉANCE</span></div>
+          <div class="body-maps sum-maps">
+            <figure>${bodySvg('front', lv)}<figcaption>FACE</figcaption></figure>
+            <figure>${bodySvg('back', lv)}<figcaption>DOS</figcaption></figure>
+          </div>
+          <div class="sum-legend"><span>Moins de séries</span><i></i><span>Plus de séries</span></div>
+          <div class="sum-foot"><span>${top || '—'}</span><span>Séries effectives</span></div>
+        </div>
+        ${recs.length ? `<div class="sum-card">
+          <div class="sum-card-head"><h3>${recs.length} record${recs.length > 1 ? 's' : ''} battu${recs.length > 1 ? 's' : ''}</h3><span>CETTE SÉANCE</span></div>
+          ${recs.map(r => `<div class="sum-rec">${ICON.trophy}<span>${esc(exName(r.ex.exerciseId))}</span><b>${fmtNum(r.s.weight, 2)} ${unit()} × ${r.s.reps}</b></div>`).join('')}
+        </div>` : ''}
+        <button class="btn-primary" data-action="sum-close">Terminé</button>
+        <button class="btn-plain" data-action="sum-detail" data-id="${w.id}">Voir le détail de la séance</button>
+      </div>
+    </div>`;
+  root.className = '';
+  requestAnimationFrame(() => requestAnimationFrame(() => { root.className = 'open'; }));
+  vibrate([20, 40, 20]);
+}
+function closeSummary() {
+  const root = $('#summary-root');
+  root.className = '';
+  setTimeout(() => { if (!root.classList.contains('open')) root.innerHTML = ''; }, 400);
+}
+ACTIONS['sum-close'] = closeSummary;
+ACTIONS['sum-detail'] = el => { closeSummary(); openWorkoutDetail(el.dataset.id); };
 
 /* ===================== 9. ONGLET PROGRÈS ================================= */
 /** Semaines consécutives avec au moins une séance */
@@ -1756,38 +1815,7 @@ function heatmap(from, end, volByDay) {
   return out + '</svg></div>';
 }
 
-/** Silhouette (face ou dos) colorée selon l'intensité de chaque muscle */
-function bodySvg(side, lv) {
-  const c = m => `class="mz l${lv[m] || 0}"`;
-  const base = 'class="mz-base"';
-  const common = `
-    <circle cx="50" cy="15" r="10" ${base}/>
-    <rect x="45" y="24" width="10" height="9" rx="3" ${base}/>
-    <ellipse cx="21.5" cy="98" rx="4" ry="5" ${base}/><ellipse cx="78.5" cy="98" rx="4" ry="5" ${base}/>
-    <ellipse cx="40" cy="187" rx="6.5" ry="3.5" ${base}/><ellipse cx="60" cy="187" rx="6.5" ry="3.5" ${base}/>
-    <ellipse ${c('epaules')} cx="30" cy="42" rx="8" ry="7"/><ellipse ${c('epaules')} cx="70" cy="42" rx="8" ry="7"/>
-    <ellipse ${c('avant-bras')} cx="23" cy="81" rx="4.5" ry="11"/><ellipse ${c('avant-bras')} cx="77" cy="81" rx="4.5" ry="11"/>
-    <ellipse cx="41" cy="147" rx="5" ry="4" ${base}/><ellipse cx="59" cy="147" rx="5" ry="4" ${base}/>`;
-  if (side === 'front') return `<svg viewBox="0 0 100 195" class="body-svg">${common}
-    <path ${c('trapezes')} d="M44 31 L35 37 L45 37 Z M56 31 L65 37 L55 37 Z"/>
-    <path ${c('pectoraux')} d="M49 37 L37 37 Q31 43 34 53 Q42 58 49 55 Z M51 37 L63 37 Q69 43 66 53 Q58 58 51 55 Z"/>
-    <ellipse ${c('biceps')} cx="26.5" cy="58" rx="5" ry="10"/><ellipse ${c('biceps')} cx="73.5" cy="58" rx="5" ry="10"/>
-    <rect ${c('abdos')} x="42.5" y="58" width="15" height="33" rx="5"/>
-    <path ${c('obliques')} d="M35 57 Q33 75 38 91 L41 91 L41 58 Z M65 57 Q67 75 62 91 L59 91 L59 58 Z"/>
-    <path ${base} d="M37 93 L63 93 L62 104 L50 109 L38 104 Z"/>
-    <ellipse ${c('quadriceps')} cx="41.5" cy="124" rx="8" ry="19"/><ellipse ${c('quadriceps')} cx="58.5" cy="124" rx="8" ry="19"/>
-    <ellipse ${c('mollets')} cx="40.5" cy="166" rx="4.5" ry="14"/><ellipse ${c('mollets')} cx="59.5" cy="166" rx="4.5" ry="14"/>
-  </svg>`;
-  return `<svg viewBox="0 0 100 195" class="body-svg">${common}
-    <path ${c('trapezes')} d="M50 28 L36 38 L50 58 L64 38 Z"/>
-    <path ${c('dos')} d="M38 43 Q32 57 38 77 L48 81 L48 58 Z M62 43 Q68 57 62 77 L52 81 L52 58 Z"/>
-    <ellipse ${c('triceps')} cx="26.5" cy="58" rx="5" ry="10"/><ellipse ${c('triceps')} cx="73.5" cy="58" rx="5" ry="10"/>
-    <rect ${c('lombaires')} x="42.5" y="80" width="15" height="13" rx="4"/>
-    <ellipse ${c('fessiers')} cx="43" cy="103" rx="8" ry="9"/><ellipse ${c('fessiers')} cx="57" cy="103" rx="8" ry="9"/>
-    <ellipse ${c('ischios')} cx="41.5" cy="128" rx="7.5" ry="16"/><ellipse ${c('ischios')} cx="58.5" cy="128" rx="7.5" ry="16"/>
-    <ellipse ${c('mollets')} cx="40.5" cy="164" rx="6" ry="13"/><ellipse ${c('mollets')} cx="59.5" cy="164" rx="6" ry="13"/>
-  </svg>`;
-}
+/* bodySvg() est défini dans body.js */
 
 /* ======================== 11. DÉMARRAGE ================================== */
 /** Séances d'exemple créées au premier lancement */
