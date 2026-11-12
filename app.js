@@ -26,7 +26,7 @@ const cap = s => s.charAt(0).toUpperCase() + s.slice(1);
 const norm = s => String(s).normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
 const DAY = 864e5;
 /** Version affichée dans Réglages (à augmenter à chaque mise en ligne) */
-const APP_VERSION = '1.11';
+const APP_VERSION = '1.12';
 
 const MONTHS = ['Janvier', 'Février', 'Mars', 'Avril', 'Mai', 'Juin', 'Juillet', 'Août', 'Septembre', 'Octobre', 'Novembre', 'Décembre'];
 const MONTHS_SHORT = ['janv.', 'févr.', 'mars', 'avr.', 'mai', 'juin', 'juil.', 'août', 'sept.', 'oct.', 'nov.', 'déc.'];
@@ -143,6 +143,7 @@ async function save(store, obj) {
   const i = arr.findIndex(x => x.id === obj.id);
   if (i >= 0) arr[i] = obj; else arr.push(obj);
   if (store === 'exercises') rebuildExIndex();
+  if (store === 'workouts') invalidateWorkouts();
   await DB.put(store, obj);
 }
 async function removeItem(store, id) {
@@ -153,7 +154,16 @@ async function removeItem(store, id) {
 const saveSettings = () => DB.put('settings', S.settings);
 
 /** Entraînements triés du plus récent au plus ancien */
-const workoutsDesc = () => [...S.data.workouts].sort((a, b) => b.startTime - a.startTime);
+/* Cache des calculs sur l'historique : invalidé dès que la liste des
+   entraînements change (ajout, suppression, recalcul des records). */
+let _wc = { ref: null, len: -1 };
+function wCache() {
+  const a = S.data.workouts;
+  if (_wc.ref !== a || _wc.len !== a.length || _wc.dirty) _wc = { ref: a, len: a.length, desc: null, prev: new Map(), best: new Map(), hist: new Map() };
+  return _wc;
+}
+const invalidateWorkouts = () => { _wc.dirty = true; };
+const workoutsDesc = () => { const c = wCache(); return c.desc || (c.desc = [...S.data.workouts].sort((a, b) => b.startTime - a.startTime)); };
 
 /** Statistiques d'un entraînement (enregistré ou en cours) */
 function wStats(w) {
@@ -186,34 +196,44 @@ function muscleSets(workouts) {
 
 /** Meilleur 1RM estimé historique d'un exercice (hors entraînement `excludeId`) */
 function bestE1RM(exerciseId, excludeId) {
+  const c = wCache(), key = exerciseId + '|' + (excludeId || '');
+  if (c.best.has(key)) return c.best.get(key);
   let best = 0;
   for (const w of S.data.workouts) {
     if (w.id === excludeId) continue;
     for (const ex of w.exercises) if (ex.exerciseId === exerciseId)
       for (const s of ex.sets) if (s.completed && isWork(s)) best = Math.max(best, e1rm(s.weight, s.reps));
   }
+  c.best.set(key, best);
   return best;
 }
 
 /** Séries de la dernière séance contenant cet exercice (colonne PREV) */
 function prevSets(exerciseId) {
+  const c = wCache();
+  if (c.prev.has(exerciseId)) return c.prev.get(exerciseId);
+  let out = [];
   for (const w of workoutsDesc()) {
     const ex = w.exercises.find(x => x.exerciseId === exerciseId);
-    if (ex) { const done = ex.sets.filter(s => s.completed); if (done.length) return done; }
+    if (ex) { const done = ex.sets.filter(s => s.completed); if (done.length) { out = done; break; } }
   }
-  return [];
+  c.prev.set(exerciseId, out);
+  return out;
 }
 
 /** Historique complet d'un exercice, du plus ancien au plus récent */
 function exerciseHistory(exerciseId) {
+  const c = wCache();
+  if (c.hist.has(exerciseId)) return c.hist.get(exerciseId);
   const out = [];
-  for (const w of [...S.data.workouts].sort((a, b) => a.startTime - b.startTime)) {
+  for (const w of [...workoutsDesc()].reverse()) {
     const sets = w.exercises.filter(x => x.exerciseId === exerciseId).flatMap(x => x.sets.filter(s => s.completed));
     if (!sets.length) continue;
     const work = sets.filter(isWork).length ? sets.filter(isWork) : sets;
     const best = work.reduce((b, s) => e1rm(s.weight, s.reps) > e1rm(b.weight, b.reps) ? s : b, work[0]);
     out.push({ w, sets, best, e1rm: e1rm(best.weight, best.reps), maxW: Math.max(...sets.map(s => s.weight || 0)), volume: sets.reduce((a, s) => a + (s.weight || 0) * (s.reps || 0), 0) });
   }
+  c.hist.set(exerciseId, out);
   return out;
 }
 
@@ -242,6 +262,7 @@ async function recomputeAllRecords() {
     }
     if (dirty) changed.push(w);
   }
+  invalidateWorkouts();
   if (changed.length) await DB.putMany('workouts', changed);
 }
 
@@ -2815,8 +2836,30 @@ function measDelta(def, a, b) {
   return `${sign(d)} ${def.unit === '%' ? 'pt' : def.unit} · ${sign(p)} %`;
 }
 
+/* Photos : 2 enregistrements par photo dans le store « photos »
+   - « ph_<id> »  : date + miniature (chargée pour les listes)
+   - « phf_<id> » : image complète (chargée seulement à l'affichage) */
 let photosCache = null;
-async function loadPhotos() { if (!photosCache) { try { photosCache = await DB.getAll('photos'); } catch (e) { photosCache = []; } } return photosCache; }
+async function loadPhotos() {
+  if (photosCache) return photosCache;
+  try {
+    if (!S.settings.photosV2) await migratePhotos();
+    photosCache = await DB.getAllPrefix('photos', 'ph_');
+  } catch (e) { photosCache = []; }
+  return photosCache;
+}
+const photoFull = async id => (await DB.get('photos', 'phf_' + id.slice(3)))?.data || photosCache.find(p => p.id === id)?.thumb;
+/** Anciennes photos (image complète dans un seul enregistrement) -> nouveau format */
+async function migratePhotos() {
+  const all = await DB.getAll('photos');
+  for (const p of all.filter(x => !String(x.id).startsWith('ph_') && !String(x.id).startsWith('phf_') && x.data)) {
+    const k = uid();
+    const thumb = await dataURLResize(p.data, 360, 0.75);
+    await DB.putMany('photos', [{ id: 'ph_' + k, date: p.date, createdAt: p.createdAt, thumb }, { id: 'phf_' + k, data: p.data }]);
+    await DB.del('photos', p.id);
+  }
+  S.settings.photosV2 = true; await saveSettings();
+}
 const photosSorted = () => [...(photosCache || [])].sort((a, b) => a.date.localeCompare(b.date) || a.createdAt - b.createdAt);
 
 ACTIONS['open-measures'] = async () => {
@@ -2870,7 +2913,7 @@ ACTIONS['open-measures'] = async () => {
         }).join('')}</div>
         <div class="section-head"><h2 class="cond">Photos avant / après</h2>${photos.length ? `<button class="link-btn strong" data-action="ph-all">Tout voir ›</button>` : ''}</div>
         <div class="card">
-          ${photos.length ? `<div class="ph-strip">${photos.slice(-6).reverse().map(ph => `<button class="ph-thumb" data-action="ph-view" data-id="${ph.id}"><img src="${ph.data}" alt="" loading="lazy"><span>${fmtDateShort(parseDayKey(ph.date))}</span></button>`).join('')}</div>` : '<p class="empty-sm">Ajoute une photo pour suivre ta transformation. Elles restent uniquement sur ce téléphone.</p>'}
+          ${photos.length ? `<div class="ph-strip">${photos.slice(-6).reverse().map(ph => `<button class="ph-thumb" data-action="ph-view" data-id="${ph.id}"><img src="${ph.thumb}" alt="" loading="lazy" decoding="async"><span>${fmtDateShort(parseDayKey(ph.date))}</span></button>`).join('')}</div>` : '<p class="empty-sm">Ajoute une photo pour suivre ta transformation. Elles restent uniquement sur ce téléphone.</p>'}
           <div class="row-actions" style="margin-top:12px">
             <label class="btn-soft" for="ph-file">${ICON.camera}<span>Ajouter</span></label>
             <button class="btn-soft" data-action="ph-compare" ${photos.length < 2 ? 'disabled' : ''}>${ICON.chart}<span>Comparer</span></button>
@@ -3036,33 +3079,30 @@ function openMeasureForm(id, onDone) {
 }
 
 /* ----- Photos avant / après (stockées uniquement sur le téléphone) ----- */
-/** Redimensionne la photo (1280 px max) et la compresse en JPEG */
-function fileToDataURL(file, max = 1280) {
-  return new Promise((resolve, reject) => {
-    const url = URL.createObjectURL(file);
-    const img = new Image();
-    img.onload = () => {
-      const r = Math.min(1, max / Math.max(img.width, img.height));
-      const c = document.createElement('canvas');
-      c.width = Math.round(img.width * r); c.height = Math.round(img.height * r);
-      c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
-      URL.revokeObjectURL(url);
-      resolve(c.toDataURL('image/jpeg', 0.82));
-    };
-    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('image')); };
-    img.src = url;
-  });
+function loadImage(src) {
+  return new Promise((resolve, reject) => { const img = new Image(); img.onload = () => resolve(img); img.onerror = () => reject(new Error('image')); img.src = src; });
 }
+function imgToDataURL(img, max, q) {
+  const r = Math.min(1, max / Math.max(img.width, img.height));
+  const c = document.createElement('canvas');
+  c.width = Math.round(img.width * r); c.height = Math.round(img.height * r);
+  c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+  return c.toDataURL('image/jpeg', q);
+}
+const dataURLResize = async (src, max, q) => imgToDataURL(await loadImage(src), max, q);
 async function addPhotoFromFile(file) {
   if (!file) return;
+  const url = URL.createObjectURL(file);
   try {
     toast('Ajout de la photo…');
-    const data = await fileToDataURL(file);
-    const ph = { id: uid(), date: dayKey(Date.now()), data, createdAt: Date.now() };
-    await DB.put('photos', ph);
-    (await loadPhotos()).push(ph);
+    const img = await loadImage(url);
+    const k = uid();
+    const meta = { id: 'ph_' + k, date: dayKey(Date.now()), createdAt: Date.now(), thumb: imgToDataURL(img, 360, 0.75) };
+    await DB.putMany('photos', [meta, { id: 'phf_' + k, data: imgToDataURL(img, 1280, 0.82) }]);
+    (await loadPhotos()).push(meta);
     toast('Photo ajoutée');
   } catch (e) { toast('Impossible de lire cette photo'); }
+  finally { URL.revokeObjectURL(url); }
 }
 function openPhotosPage(onChange) {
   const pg = pushPage({
@@ -3075,7 +3115,7 @@ function openPhotosPage(onChange) {
       return `<input type="file" id="ph-file2" accept="image/*" data-change="ph-file" hidden>
         ${list.length >= 2 ? `<button class="btn-primary" data-action="ph-compare">${ICON.chart} Comparer avant / après</button>` : ''}
         ${Object.entries(byDate).map(([k, ps]) => `<div class="day-head"><h3>${fmtDateY(k).toUpperCase()}</h3><span class="mono-sm">${ps.length} photo${ps.length > 1 ? 's' : ''}</span></div>
-          <div class="ph-grid">${ps.map(p => `<button class="ph-thumb" data-action="ph-view" data-id="${p.id}"><img src="${p.data}" alt="" loading="lazy"></button>`).join('')}</div>`).join('') || emptyState(ICON.camera, 'Aucune photo.')}`;
+          <div class="ph-grid">${ps.map(p => `<button class="ph-thumb" data-action="ph-view" data-id="${p.id}"><img src="${p.thumb}" alt="" loading="lazy" decoding="async"></button>`).join('')}</div>`).join('') || emptyState(ICON.camera, 'Aucune photo.')}`;
     },
     changes: { 'ph-file': async el => { await addPhotoFromFile(el.files[0]); el.value = ''; renderPage(pg); onChange(); } },
     actions: {
@@ -3084,47 +3124,56 @@ function openPhotosPage(onChange) {
     }
   });
 }
-function openPhotoViewer(id, onChange) {
+async function openPhotoViewer(id, onChange) {
   const ph = (photosCache || []).find(p => p.id === id); if (!ph) return;
   const sh = openSheet({
     full: true,
     html: `<div class="sheet-top"><span></span><h3>${fmtDateY(ph.date)}</h3><button class="link-btn strong" data-action="sheet-close">OK</button></div>
-      <img class="ph-full" src="${ph.data}" alt="">
+      <img class="ph-full" id="ph-full" src="${ph.thumb}" alt="" decoding="async">
       <label class="lbl">Date de la photo</label><input class="field" type="date" data-input="pv-date" value="${ph.date}" max="${dayKey(Date.now())}">
       <button class="btn-plain danger" data-action="pv-del">Supprimer la photo</button>`,
     inputs: { 'pv-date': async el => { if (!el.value) return; ph.date = el.value; await DB.put('photos', ph); onChange(); } },
     actions: {
       'pv-del': async () => {
         if (!await confirmSheet('Supprimer cette photo ?', 'Elle sera effacée de ce téléphone.', 'Supprimer', true)) return;
-        await DB.del('photos', id);
+        await DB.del('photos', id); await DB.del('photos', 'phf_' + id.slice(3));
         photosCache = photosCache.filter(p => p.id !== id);
         sh.close(); onChange();
       }
     }
   });
+  const full = await photoFull(id); // la miniature s'affiche tout de suite, l'image complète ensuite
+  const img = $('#ph-full', sh.el); if (img && full) img.src = full;
 }
 /** Comparaison côte à côte : touche « Avant » ou « Après », puis une miniature */
 function openPhotoCompare() {
   const list = photosSorted();
   if (list.length < 2) return;
   const st = { a: list[0].id, b: list[list.length - 1].id, target: 'a' };
+  const full = {};
   const get = id => list.find(p => p.id === id);
   const body = () => {
     const A = get(st.a), B = get(st.b);
     const days = Math.round((parseDayKey(B.date) - parseDayKey(A.date)) / DAY);
     return `<div class="sheet-top"><span></span><h3>Avant / après</h3><button class="link-btn strong" data-action="sheet-close">OK</button></div>
       <div class="cmp">${[['a', 'AVANT', A], ['b', 'APRÈS', B]].map(([k, l, p]) => `<button class="cmp-col ${st.target === k ? 'on' : ''}" data-action="cmp-target" data-v="${k}">
-        <span class="cmp-l">${l}</span><img src="${p.data}" alt=""><span class="cmp-d">${fmtDateY(p.date)}</span></button>`).join('')}</div>
-      <p class="muted sm center">${days > 0 ? `${days} jours d'écart` : days < 0 ? `${-days} jours d'écart` : 'Même jour'} · touche « Avant » ou « Après » puis choisis une photo</p>
-      <div class="ph-strip">${[...list].reverse().map(p => `<button class="ph-thumb ${p.id === st.a || p.id === st.b ? 'sel' : ''}" data-action="cmp-pick" data-id="${p.id}"><img src="${p.data}" alt="" loading="lazy"><span>${fmtDateShort(parseDayKey(p.date))}</span></button>`).join('')}</div>`;
+        <span class="cmp-l">${l}</span><img src="${full[p.id] || p.thumb}" alt="" decoding="async"><span class="cmp-d">${fmtDateY(p.date)}</span></button>`).join('')}</div>
+      <p class="muted sm center">${days ? `${Math.abs(days)} jours d'écart` : 'Même jour'} · touche « Avant » ou « Après » puis choisis une photo</p>
+      <div class="ph-strip">${[...list].reverse().map(p => `<button class="ph-thumb ${p.id === st.a || p.id === st.b ? 'sel' : ''}" data-action="cmp-pick" data-id="${p.id}"><img src="${p.thumb}" alt="" loading="lazy" decoding="async"><span>${fmtDateShort(parseDayKey(p.date))}</span></button>`).join('')}</div>`;
+  };
+  const loadFull = async () => {
+    let changed = false;
+    for (const id of [st.a, st.b]) if (!full[id]) { full[id] = await photoFull(id); changed = true; }
+    if (changed && sheets.includes(sh)) sh.set(body());
   };
   const sh = openSheet({
     full: true, html: body(),
     actions: {
       'cmp-target': el => { st.target = el.dataset.v; sh.set(body()); },
-      'cmp-pick': el => { st[st.target] = el.dataset.id; st.target = st.target === 'a' ? 'b' : 'a'; sh.set(body()); }
+      'cmp-pick': el => { st[st.target] = el.dataset.id; st.target = st.target === 'a' ? 'b' : 'a'; sh.set(body()); loadFull(); }
     }
   });
+  loadFull();
 }
 
 /* ----- Réglages ----- */
@@ -3223,7 +3272,7 @@ ACTIONS['open-settings'] = () => {
 };
 
 async function exportBackup() {
-  const data = { app: 'GymLog', version: 2, exportedAt: new Date().toISOString(), settings: S.settings, ...S.data, photos: await loadPhotos() };
+  const data = { app: 'GymLog', version: 2, exportedAt: new Date().toISOString(), settings: S.settings, ...S.data, photos: await DB.getAll('photos') };
   const blob = new Blob([JSON.stringify(data, null, 1)], { type: 'application/json' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
@@ -3296,25 +3345,6 @@ function lineChart(series, { h = 170, w = 340, yFmt = v => v, zero = false, yMin
   return out + '</svg>';
 }
 
-/** Heatmap d'activité façon GitHub (colonnes = semaines, lignes = jours) */
-function heatmap(from, end, volByDay) {
-  const start = startOfWeek(from);
-  const nWeeks = Math.ceil((end - start.getTime()) / (7 * DAY));
-  const vals = Object.values(volByDay);
-  const max = Math.max(1, ...vals);
-  const cell = 12, gap = 3, left = 14;
-  const W = left + nWeeks * (cell + gap), H = 7 * (cell + gap);
-  let out = `<div class="heatmap-wrap"><svg class="heatmap" viewBox="0 0 ${W} ${H}" style="max-width:${Math.max(W * 1.6, 200)}px">`;
-  ['L', '', 'M', '', 'V', '', 'D'].forEach((l, i) => { if (l) out += `<text x="0" y="${i * (cell + gap) + 9}" class="axis">${l}</text>`; });
-  for (let wk = 0; wk < nWeeks; wk++) for (let d = 0; d < 7; d++) {
-    const t = addDays(start, wk * 7 + d).getTime();
-    if (t >= end) continue;
-    const v = volByDay[dayKey(t)] || 0;
-    const lvl = t < from ? -1 : v ? Math.min(4, 1 + Math.floor(v / max * 3.99)) : 0;
-    out += `<rect x="${left + wk * (cell + gap)}" y="${d * (cell + gap)}" width="${cell}" height="${cell}" rx="3" class="hm l${lvl}"><title>${fmtDateShort(t)} : ${fmtVol(v)}</title></rect>`;
-  }
-  return out + '</svg></div>';
-}
 
 /* bodySvg() est défini dans body.js */
 
@@ -3499,9 +3529,9 @@ async function restoreExampleTemplates() {
 
 async function init() {
   await DB.init();
-  for (const st of ['exercises', 'workouts', 'templates', 'folders', 'measurements']) {
+  await Promise.all(['exercises', 'workouts', 'templates', 'folders', 'measurements'].map(async st => {
     try { S.data[st] = await DB.getAll(st); } catch (e) { S.data[st] = []; }
-  }
+  }));
   const saved = await DB.get('settings', 'main').catch(() => null);
   if (saved) Object.assign(S.settings, saved);
   try { await mergeFallbackData(); } catch (e) { console.warn('Fusion des données de repli impossible', e); }

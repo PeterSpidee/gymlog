@@ -1,14 +1,15 @@
 /* ==========================================================================
    GymLog — Service Worker
-   Stratégie « réseau d'abord » :
-   - en ligne : on récupère toujours la version la plus récente (vérification
-     rapide via ETag) et on met le cache à jour ;
-   - réseau lent (> 3 s) ou hors ligne : on sert la copie en cache.
-   Ainsi une mise à jour publiée est visible dès le lancement suivant,
-   et l'app fonctionne toujours sans connexion à la salle.
+   Stratégie « cache d'abord, versionné » :
+   - l'app démarre instantanément depuis sa copie locale, même sans réseau
+     ou avec un réseau faible à la salle ;
+   - les mises à jour arrivent par ce fichier : à chaque déploiement on change
+     CACHE_VERSION, le navigateur installe le nouveau service worker qui
+     télécharge des copies fraîches de tous les fichiers (cache: 'reload'),
+     supprime les anciennes, puis l'app se recharge toute seule.
    Incrémenter CACHE_VERSION à chaque déploiement.
    ========================================================================== */
-const CACHE_VERSION = 'gymlog-v11';
+const CACHE_VERSION = 'gymlog-v12';
 const ASSETS = [
   './',
   './index.html',
@@ -24,10 +25,8 @@ const ASSETS = [
   './icons/icon-512.png',
   './icons/icon-maskable-512.png'
 ];
-const NETWORK_TIMEOUT = 3000;
 
-// Installation : on télécharge des copies fraîches (cache: 'reload' ignore
-// le cache HTTP du navigateur, sinon on risquerait de stocker d'anciens fichiers)
+// Installation : copies fraîches de tous les fichiers (sans passer par le cache HTTP)
 self.addEventListener('install', event => {
   event.waitUntil(
     caches.open(CACHE_VERSION)
@@ -36,7 +35,7 @@ self.addEventListener('install', event => {
   );
 });
 
-// Activation : suppression des anciens caches, prise de contrôle immédiate
+// Activation : suppression des anciennes versions, prise de contrôle immédiate
 self.addEventListener('activate', event => {
   event.waitUntil(
     caches.keys()
@@ -45,6 +44,7 @@ self.addEventListener('activate', event => {
   );
 });
 
+// Requêtes : copie locale d'abord (démarrage instantané), réseau sinon
 self.addEventListener('fetch', event => {
   const req = event.request;
   const url = new URL(req.url);
@@ -53,19 +53,13 @@ self.addEventListener('fetch', event => {
 
   event.respondWith((async () => {
     const cache = await caches.open(CACHE_VERSION);
-    // 'no-cache' : le navigateur revalide auprès du serveur (réponse 304 légère si rien n'a changé)
-    const network = fetch(new Request(req.url, { cache: 'no-cache', credentials: 'same-origin' }))
-      .then(res => { if (res && res.ok) cache.put(key, res.clone()); return res; });
-    network.catch(() => { /* hors ligne : géré plus bas */ });
+    const hit = await cache.match(key) || (req.mode === 'navigate' ? (await cache.match('./index.html')) || (await cache.match('./')) : null);
+    if (hit) return hit;
     try {
-      return await Promise.race([
-        network,
-        new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), NETWORK_TIMEOUT))
-      ]);
+      const res = await fetch(new Request(req.url, { cache: 'no-cache', credentials: 'same-origin' }));
+      if (res && res.ok) cache.put(key, res.clone());
+      return res;
     } catch (e) {
-      const cached = await caches.match(key) || await caches.match(req, { ignoreSearch: true });
-      if (cached) return cached;
-      if (req.mode === 'navigate') return (await caches.match('./index.html')) || Response.error();
       return Response.error();
     }
   })());

@@ -1154,3 +1154,6 @@ label.btn-soft { cursor: pointer; }
 .reps-btn { display: grid; place-items: center; font-family: var(--font-cond); font-weight: 700; font-size: 19px; border-radius: 9px; }
 .reps-btn.empty { color: var(--text); opacity: .38; }
 .reps-btn:active { background: var(--card); }
+
+/* Performance : le navigateur ne dessine pas les éléments de longues listes hors écran */
+.w-row, .hist-item, .sess2, .br-row, .meas-row, .meas-row2, .rec-row, .ex-row { content-visibility: auto; contain-intrinsic-size: auto 64px; }

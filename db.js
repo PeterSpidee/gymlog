@@ -88,6 +88,12 @@ const DB = (() => {
     return (await reqP(idb.transaction(store).objectStore(store).get(id))) ?? null;
   }
 
+  /** Objets dont l'identifiant commence par `prefix` (ex. miniatures de photos) */
+  async function getAllPrefix(store, prefix) {
+    if (fallback) return Object.values(lsRead(store)).filter(o => String(o.id).startsWith(prefix));
+    return reqP(idb.transaction(store).objectStore(store).getAll(IDBKeyRange.bound(prefix, prefix + '￿')));
+  }
+
   /** Insère ou remplace plusieurs objets */
   async function putMany(store, list) {
     if (!list.length) return;
@@ -126,7 +132,7 @@ const DB = (() => {
   }
 
   return {
-    STORES, init, getAll, get, put, putMany, del, clear, readFallback, clearFallback,
+    STORES, init, getAll, getAllPrefix, get, put, putMany, del, clear, readFallback, clearFallback,
     get mode() { return fallback ? 'localStorage' : 'indexedDB'; }
   };
 })();
