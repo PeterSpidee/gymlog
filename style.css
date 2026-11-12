@@ -1098,3 +1098,46 @@ label.btn-soft { cursor: pointer; }
 .d-pill.new { background: var(--rec-soft); color: var(--rec); font-weight: 600; }
 :root[data-theme="dark"] .d-pill.down { background: #3B1512; color: #FF8A80; }
 @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .d-pill.down { background: #3B1512; color: #FF8A80; } }
+
+/* =================== Éditeur de séance (style Epilog) =================== */
+.page.bare .page-head { display: none; }
+.page.bare::before { content: ""; position: absolute; left: 0; right: 0; top: 0; height: var(--sat); background: var(--bg); z-index: 6; }
+.page.bare .page-body { padding: calc(var(--sat) + 8px) 12px calc(var(--sab) + 104px); }
+.page-foot { position: absolute; left: 0; right: 0; bottom: 0; z-index: 6; display: flex; gap: 12px; padding: 14px 16px calc(var(--sab) + 12px);
+  background: linear-gradient(to bottom, transparent, var(--bg) 35%); }
+.page-foot > * { flex: 1; min-height: 54px; border-radius: 27px; font-family: var(--font-cond); font-weight: 700; font-size: 19px; }
+.btn-out { background: var(--card); box-shadow: 0 0 0 1px var(--line), 0 4px 14px rgba(0, 0, 0, .06); }
+.btn-go2 { background: var(--accent); color: #fff; box-shadow: 0 8px 20px rgba(52, 199, 89, .35); }
+.page-foot > *:active { transform: scale(.97); }
+.te-head { position: sticky; top: calc(var(--sat) + 6px); z-index: 5; margin: 0 0 16px; }
+.te-head .wh-card { box-shadow: 0 0 0 .5px var(--line), 0 12px 30px rgba(0, 0, 0, .1); }
+.live-k.edit { color: var(--accent-2); }
+.live-k.edit svg { width: 13px; height: 13px; }
+.te-name { width: 100%; border: 0; background: transparent; outline: none; padding: 0; margin-top: 1px;
+  font-family: var(--font-cond); font-weight: 700; font-size: 26px; letter-spacing: -.3px; color: var(--text); }
+.te-name::placeholder { color: var(--text-2); opacity: .6; }
+.te-folder { display: flex; align-items: center; justify-content: space-between; width: 100%; min-height: 44px; margin-top: 8px; padding: 6px 4px 0;
+  border-top: .5px solid var(--line); color: var(--accent-2); font-size: 16px; text-align: left; }
+.te-folder svg { width: 16px; height: 16px; }
+.ex-params.three button:nth-child(2) { margin-right: auto; margin-left: 10px; }
+.te-table .set-row { grid-template-columns: 30px minmax(0, 1fr) 70px 70px 30px; }
+.type-pill { justify-self: center; max-width: 84px; padding: 3px 9px; border-radius: 9px; border: 1px solid color-mix(in srgb, var(--text-2) 45%, transparent);
+  background: var(--card); font-family: var(--font-mono); font-size: 11px; color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.set-row.t-warmup .type-pill { color: var(--gold); border-color: color-mix(in srgb, var(--gold) 50%, transparent); }
+.set-row.t-drop .type-pill { color: var(--cir); border-color: color-mix(in srgb, var(--cir) 50%, transparent); }
+.set-row.t-failure .type-pill { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 45%, transparent); }
+.te-table .set-row + .set-row, .set-table .dnd-list > .set-row + .set-row { box-shadow: inset 0 .5px 0 var(--line); }
+.set-grip { width: 30px; height: 44px; opacity: .55; }
+.set-grip svg { width: 18px; height: 18px; }
+.te-table .drag-ph { margin: 2px 0; border-radius: 10px; }
+.btn-add-set.in-table { width: calc(100% - 8px); margin: 6px 4px 6px; }
+.te-circ .circ-item svg { width: 15px; height: 15px; color: var(--text-2); }
+
+/* Entraînement : valeurs cibles en gras foncé (comme Epilog) */
+.set-table .set-in::placeholder { opacity: .9; }
+.set-table .set-row.done .set-in::placeholder { opacity: .5; }
+.ex-params.three { gap: 4px; margin-right: 2px; }
+.ex-params.three button { gap: 4px; letter-spacing: .6px; font-size: 10px; }
+.ex-params.three b { font-size: 15px; }
+.ex-params.three svg { width: 13px; height: 13px; }
+.ex-params.three button:nth-child(2) { margin-left: 4px; }

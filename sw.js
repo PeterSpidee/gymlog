@@ -8,7 +8,7 @@
    et l'app fonctionne toujours sans connexion à la salle.
    Incrémenter CACHE_VERSION à chaque déploiement.
    ========================================================================== */
-const CACHE_VERSION = 'gymlog-v8';
+const CACHE_VERSION = 'gymlog-v9';
 const ASSETS = [
   './',
   './index.html',

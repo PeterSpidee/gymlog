@@ -26,7 +26,7 @@ const cap = s => s.charAt(0).toUpperCase() + s.slice(1);
 const norm = s => String(s).normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
 const DAY = 864e5;
 /** Version affichée dans Réglages (à augmenter à chaque mise en ligne) */
-const APP_VERSION = '1.8';
+const APP_VERSION = '1.9';
 
 const MONTHS = ['Janvier', 'Février', 'Mars', 'Avril', 'Mai', 'Juin', 'Juillet', 'Août', 'Septembre', 'Octobre', 'Novembre', 'Décembre'];
 const MONTHS_SHORT = ['janv.', 'févr.', 'mars', 'avr.', 'mai', 'juin', 'juil.', 'août', 'sept.', 'oct.', 'nov.', 'déc.'];
@@ -304,6 +304,8 @@ function pushPage(opts) {
     </header>
     <div class="page-body"></div>`;
   const pg = { el, actions: {}, inputs: {}, changes: {}, right: '', ...opts };
+  if (pg.bare) el.classList.add('bare');
+  if (pg.footer) el.insertAdjacentHTML('beforeend', '<div class="page-foot"></div>');
   $('#pages').appendChild(el);
   pages.push(pg);
   renderPage(pg);
@@ -318,6 +320,7 @@ function renderPage(pg) {
   body.scrollTop = top;
   $('.page-title', pg.el).textContent = typeof pg.title === 'function' ? pg.title(pg) : pg.title;
   $('.page-right', pg.el).innerHTML = typeof pg.right === 'function' ? pg.right(pg) : pg.right;
+  if (pg.footer) $('.page-foot', pg.el).innerHTML = pg.footer(pg);
   pg.after && pg.after(pg);
 }
 function popPage() {
@@ -583,7 +586,7 @@ ACTIONS['log-past'] = () => {
         startWorkout({
           name: d.name.trim() || 'Entraînement libre', templateId: t ? t.id : null,
           startTime: start.getTime(), manual: true, durationMin: d.dur,
-          exercises: t ? t.exercises.map(e => ({ exerciseId: e.exerciseId, restTime: e.restTime, tempo: e.tempo, targetReps: e.targetReps, supersetId: e.supersetId, nSets: e.targetSets || 3 })) : []
+          exercises: t ? specFromTemplate(t) : []
         });
       }
     }
@@ -642,8 +645,12 @@ function openWorkoutDetail(id) {
 
 /* ====================== 6. ONGLET SÉANCES ================================ */
 function estimateDuration(t) {
-  const sec = t.exercises.reduce((a, e) => a + (e.targetSets || 3) * (45 + (e.restTime ?? S.settings.restTimerDefault)), 0);
-  return Math.max(5, Math.round(sec / 60 / 5) * 5);
+  let sec = 0;
+  for (const e of t.exercises) {
+    if (e.kind === 'circuit') { sec += e.format === 'amrap' ? e.minutes * 60 : e.format === 'emom' ? e.rounds * 60 : e.format === 'hiit' ? e.rounds * (e.work + e.rest) : e.rounds * e.items.length * 45 + 60; continue; }
+    sec += tplSets(e).length * (45 + (e.restTime ?? S.settings.restTimerDefault));
+  }
+  return Math.max(1, Math.round(sec / 60));
 }
 function lastDone(templateId) {
   return workoutsDesc().find(w => w.templateId === templateId) || null;
@@ -671,7 +678,7 @@ function viewSeances() {
 /** Dossiers + séances (re-rendu seul pendant la recherche, pour garder le clavier) */
 function seancesList() {
   const q = S.tplSearch ? norm(S.tplQuery || '').trim() : '';
-  const match = t => !q || norm(t.name).includes(q) || t.exercises.some(e => norm(exName(e.exerciseId)).includes(q));
+  const match = t => !q || norm(t.name).includes(q) || tplExIds(t).some(x => norm(exName(x)).includes(q));
   const tpls = sortedTemplates().filter(match);
   const folders = sortedFolders();
   const folderIds = new Set(folders.map(f => f.id));
@@ -708,7 +715,7 @@ function seancesList() {
 function templateCard(t, canDrag = true) {
   const last = lastDone(t.id);
   const n = t.exercises.length;
-  const names = t.exercises.map(e => exName(e.exerciseId)).join(', ');
+  const names = tplExNames(t).join(', ');
   return `<div class="tpl-card2" data-drag-id="${t.id}" data-kind="tpl">
     <div class="tpl-top">
       ${canDrag ? `<span class="drag-h" aria-label="Déplacer la séance">${GRIP}</span>` : '<span class="drag-sp"></span>'}
@@ -784,7 +791,7 @@ function openTemplateStats(id) {
       const metric = { volume: r => toU(r.volume), duree: r => (r.w.duration || 0) / 60, series: r => r.sets }[st.metric];
       const fmtY = { volume: v => v >= 1000 ? fmtNum(v / 1000, 1) + 't' : fmtNum(v), duree: v => fmtNum(v) + ' min', series: v => fmtNum(v) }[st.metric];
       // Progression du 1RM estimé par exercice (1re fois -> dernière fois dans cette séance)
-      const exProg = t.exercises.map(e => {
+      const exProg = t.exercises.filter(e => e.exerciseId).map(e => {
         const pts = ws.map(w => {
           const sets = w.exercises.filter(x => x.exerciseId === e.exerciseId).flatMap(x => x.sets);
           return Math.max(0, ...sets.map(s => e1rm(s.weight, s.reps)));
@@ -829,7 +836,7 @@ document.addEventListener('pointerdown', e => {
   item.classList.add('dragging');
   document.body.classList.add('is-dragging');
   try { h.setPointerCapture(e.pointerId); } catch (_) { }
-  drag = { item, ph, kind: item.dataset.kind, startY: e.clientY, top: r.top, y: e.clientY, scroller: item.closest('.w-body') || item.closest('.page-body') || $('#views') };
+  drag = { item, ph, kind: item.dataset.kind, home: ph.parentNode, startY: e.clientY, top: r.top, y: e.clientY, scroller: item.closest('.w-body') || item.closest('.page-body') || $('#views') };
   vibrate(10);
   drag.raf = requestAnimationFrame(autoScroll);
 }, { passive: false });
@@ -845,7 +852,7 @@ document.addEventListener('pointermove', e => {
 /** Déplace l'emplacement en pointillés selon la position du doigt */
 function placePlaceholder() {
   const { kind, y, ph, item } = drag;
-  const lists = $$(`.dnd-list[data-dnd="${kind === 'folder' ? 'folders' : kind === 'wex' ? 'wex' : 'tpl'}"]`).filter(l => l.offsetParent !== null);
+  const lists = kind === 'tset' ? [drag.home] : $$(`.dnd-list[data-dnd="${kind === 'folder' ? 'folders' : kind === 'wex' || kind === 'tex' ? kind : 'tpl'}"]`).filter(l => l.offsetParent !== null);
   if (!lists.length) return;
   // liste visée : celle qui contient le doigt, sinon la plus proche
   let target = lists[0], bestD = Infinity;
@@ -869,6 +876,7 @@ function autoScroll() {
   drag.raf = requestAnimationFrame(autoScroll);
 }
 
+const drag_home_ex = el => el.closest('[data-kind="tex"]');
 async function endDrag() {
   if (!drag) return;
   const { item, ph, kind } = drag;
@@ -878,6 +886,23 @@ async function endDrag() {
   item.removeAttribute('style');
   item.classList.remove('dragging');
   document.body.classList.remove('is-dragging');
+  if (kind === 'tex' || kind === 'tset') {
+    // Éditeur de séance : ordre des exercices, ou des séries d'un exercice
+    const ed = S.tplEdit;
+    if (ed) {
+      if (kind === 'tex') {
+        const old = ed.draft.exercises;
+        ed.draft.exercises = $$('.dnd-list[data-dnd="tex"] > [data-kind="tex"]', ed.pg.el).map(el => old[+el.dataset.dragId]);
+        cleanSupersets(ed.draft.exercises);
+      } else {
+        const exEl = drag_home_ex(item);
+        const e = exEl && ed.draft.exercises[+exEl.dataset.dragId];
+        if (e) { const old = e.sets; e.sets = [...item.parentNode.children].filter(c => c.dataset.kind === 'tset').map(c => old[+c.dataset.dragId]); }
+      }
+      ed.touch(); vibrate(8); renderPage(ed.pg);
+    }
+    return;
+  }
   if (kind === 'wex') {
     // Exercices de la séance en cours : nouvel ordre d'après le DOM
     const a = S.active, old = a.exercises;
@@ -914,7 +939,7 @@ ACTIONS['start-template'] = el => {
   const t = S.data.templates.find(x => x.id === el.dataset.id); if (!t) return;
   startWorkout({
     name: t.name, templateId: t.id,
-    exercises: t.exercises.map(e => ({ exerciseId: e.exerciseId, restTime: e.restTime, tempo: e.tempo, targetReps: e.targetReps, supersetId: e.supersetId, nSets: e.targetSets || 3 }))
+    exercises: specFromTemplate(t)
   });
 };
 ACTIONS['new-template'] = () => openTemplateEditor(null);
@@ -956,91 +981,236 @@ async function moveFolder(f, dir) {
   renderTab();
 }
 
-/** Éditeur de séance (modèle) */
+/* ----- Séances types : séries cibles par série + circuits ----- */
+ICON.pen = svg('<path d="M4 20l4.5-1 10-10-3.5-3.5-10 10z"/><path d="M14 6.5l3.5 3.5"/>');
+ICON.list = svg('<path d="M5 7h14M5 12h14M5 17h14"/>');
+ICON.grip2 = svg('<path d="M5 9h14M5 15h14"/>', 2.2);
+const TYPE_PILL = { normal: 'Normale', warmup: 'Échauff.', drop: 'Drop set', failure: 'Échec' };
+
+/** Séries cibles d'un exercice de séance type (compatibilité avec l'ancien format) */
+const tplSets = e => e.sets ? e.sets : Array.from({ length: e.targetSets || 3 }, () => ({ type: 'normal', weight: null, reps: e.targetReps != null ? String(e.targetReps) : null }));
+/** Remet une séance type au format courant (séries cibles + résumé targetSets/targetReps) */
+function normalizeTpl(t) {
+  t.exercises.forEach(e => {
+    if (e.kind === 'circuit') return;
+    e.sets = tplSets(e).map(s => ({ type: s.type || 'normal', weight: s.weight ?? null, reps: s.reps ? (parseRange(s.reps)?.text || null) : null }));
+    const work = e.sets.filter(isWork);
+    e.targetSets = work.length || e.sets.length;
+    e.targetReps = (work[0] || e.sets[0] || {}).reps || null;
+  });
+  return t;
+}
+const tplExNames = t => t.exercises.map(e => e.kind === 'circuit' ? `${e.name || 'Circuit'} (${CIRCUIT_FORMATS[e.format]})` : exName(e.exerciseId));
+const tplExIds = t => t.exercises.flatMap(e => e.kind === 'circuit' ? e.items.map(it => it.exerciseId) : [e.exerciseId]);
+function tplSetCount(t) {
+  return t.exercises.reduce((a, e) => a + (e.kind === 'circuit' ? (e.format === 'amrap' ? 1 : e.rounds) * e.items.length : tplSets(e).length), 0);
+}
+/** Spécification de démarrage d'une séance type */
+function specFromTemplate(t) {
+  return t.exercises.map(e => e.kind === 'circuit' ? JSON.parse(JSON.stringify(e))
+    : { exerciseId: e.exerciseId, restTime: e.restTime, tempo: e.tempo, targetReps: e.targetReps, supersetId: e.supersetId, plan: tplSets(e) });
+}
+function circuitParamsText(c) {
+  return { rounds: `${c.rounds} TOURS`, hiit: `${c.rounds} TOURS · ${c.work}S / ${c.rest}S`, emom: `${c.rounds} MIN`, amrap: `${c.minutes} MIN` }[c.format];
+}
+/** "~1 h 12", "~45 min" */
+const fmtDurLong = min => min < 60 ? `${min} min` : `${Math.floor(min / 60)} h ${pad(min % 60)}`;
+
+/** Éditeur de séance (création / modification), au style de l'écran d'entraînement */
 function openTemplateEditor(id, folderId = null) {
   const src = id ? S.data.templates.find(t => t.id === id) : null;
-  const draft = src ? JSON.parse(JSON.stringify(src)) : { id: uid(), name: '', folderId, order: S.data.templates.length, exercises: [] };
+  const draft = normalizeTpl(src ? JSON.parse(JSON.stringify(src)) : { id: uid(), name: '', folderId, order: S.data.templates.length, exercises: [] });
+  let dirty = false;
+  const touch = () => { dirty = true; };
+  const rerender = () => { touch(); renderPage(pg); };
+  const exAt = el => draft.exercises[+el.dataset.i];
+  const setAtT = el => draft.exercises[+el.dataset.i].sets[+el.dataset.j];
+
+  const exCard = (e, i) => {
+    const ex = EX.get(e.exerciseId);
+    const prev = prevSets(e.exerciseId);
+    const pE = draft.exercises[i - 1], nE = draft.exercises[i + 1];
+    const ss = !!e.supersetId;
+    const ssFirst = ss && !(pE && pE.supersetId === e.supersetId), ssLast = ss && !(nE && nE.supersetId === e.supersetId);
+    return `<section class="ex-card te-card ${ss ? 'ss' : ''} ${ssFirst ? 'ss-first' : ''} ${ssLast ? 'ss-last' : ''}" data-drag-id="${i}" data-kind="tex">
+      ${ssFirst ? '<span class="ss-label">SUPERSET</span>' : ''}
+      <div class="ex-head">
+        <span class="drag-h" aria-label="Déplacer l'exercice">${GRIP}</span>
+        ${exThumb(ex)}
+        <h3 class="ex-name">${esc(exName(e.exerciseId))}</h3>
+        <button class="icon-btn sm ${ex && ex.note ? 'has-note' : ''}" data-action="te-note" data-i="${i}" aria-label="Note">${ICON.note}</button>
+        <button class="icon-btn sm" data-action="te-ex-menu" data-i="${i}" aria-label="Options">${ICON.more}</button>
+      </div>
+      ${ex && ex.note ? `<p class="ex-note tap" data-action="te-note" data-i="${i}">${esc(ex.note)}</p>` : ''}
+      <div class="ex-params three">
+        <button data-action="te-rest" data-i="${i}">${ICON.timer}<span>REPOS</span>›<b>${e.restTime ? fmtClock(e.restTime) : 'Aucun'}</b></button>
+        <button data-action="te-nsets" data-i="${i}">${ICON.list}<span>SÉRIES</span>›<b>${e.sets.length}</b></button>
+        <button data-action="te-tempo" data-i="${i}">${ICON.metro}<span>TEMPO</span>›<b class="${e.tempo ? '' : 'muted'}">${e.tempo ? esc(e.tempo) : 'Aucun'}</b></button>
+      </div>
+      <div class="set-table te-table">
+        <div class="set-row head"><span>#</span><span>PREV</span><span>${unit().toUpperCase()}</span><span>REPS</span><span></span></div>
+        <div class="dnd-list" data-dnd="tset">${e.sets.map((s, j) => `
+          <div class="set-row t-${s.type || 'normal'}" data-drag-id="${j}" data-kind="tset">
+            <button class="set-num" data-action="te-set-menu" data-i="${i}" data-j="${j}">${setLabel(e, j)}</button>
+            <button class="type-pill" data-action="te-type" data-i="${i}" data-j="${j}" title="${prev[j] ? `Dernière fois : ${fmtW(prev[j].weight)}×${prev[j].reps}` : ''}">${TYPE_PILL[s.type || 'normal']}</button>
+            <input class="set-in" inputmode="decimal" data-input="te-w" data-i="${i}" data-j="${j}" value="${inputW(s.weight)}" placeholder="${prev[j] ? inputW(prev[j].weight) : '—'}">
+            <input class="set-in" data-input="te-r" data-change="te-r-ok" data-i="${i}" data-j="${j}" value="${esc(s.reps || '')}" placeholder="${prev[j] ? prev[j].reps : '10'}" autocomplete="off" enterkeyhint="done">
+            <span class="drag-h set-grip" aria-label="Déplacer la série">${ICON.grip2}</span>
+          </div>`).join('')}</div>
+        <button class="btn-add-set dashed in-table" data-action="te-add-set" data-i="${i}">${ICON.plus} Ajouter une série</button>
+      </div>
+    </section>`;
+  };
+  const circuitCard = (c, i) => `<section class="ex-card circuit te-circ" data-drag-id="${i}" data-kind="tex">
+      <div class="circ-top"><span class="drag-h" aria-label="Déplacer le circuit">${GRIP}</span>
+        <span class="circ-badge">${ICON.circuit}CIRCUIT · ${CIRCUIT_FORMATS[c.format].toUpperCase()}</span>
+        <button class="icon-btn sm" data-action="te-c-menu" data-i="${i}" aria-label="Options du circuit">${ICON.more}</button></div>
+      <h3 class="circ-name">${esc(c.name)}</h3>
+      <p class="circ-meta">${c.items.length} EXO${c.items.length > 1 ? 'S' : ''} · ${circuitParamsText(c)}</p>
+      <div class="circ-items">${c.items.map((it, k) => `<button class="circ-item" data-action="te-c-item" data-i="${i}" data-k="${k}">
+        <span class="ci-n">${k + 1}</span><span class="ci-txt"><b>${esc(exName(it.exerciseId))}</b><small>${it.reps ? esc(it.reps) + ' reps' : '—'} · ${it.weight ? fmtW(it.weight) + ' ' + unit() : 'poids du corps'}</small></span>${ICON.chevR}</button>`).join('')}</div>
+      <button class="btn-add-set dashed purple" data-action="te-c-add" data-i="${i}">${ICON.plus} Ajouter un exercice</button>
+    </section>`;
+
   const pg = pushPage({
+    bare: true,
     title: src ? 'Modifier la séance' : 'Nouvelle séance',
-    right: `<button class="link-btn strong" data-action="tpl-save">OK</button>`,
-    render: () => `
-      <label class="lbl">Nom</label>
-      <input class="field" data-input="tpl-name" value="${esc(draft.name)}" placeholder="Ex. : Push, Pull, Legs…" autocomplete="off">
-      <label class="lbl">Dossier</label>
-      <select class="field" data-input="tpl-folder">
-        <option value="">Aucun dossier</option>
-        ${S.data.folders.map(f => `<option value="${f.id}" ${draft.folderId === f.id ? 'selected' : ''}>${esc(f.name)}</option>`).join('')}
-      </select>
-      <div class="section-head"><h2>Exercices</h2><span class="muted">~${estimateDuration(draft)} min</span></div>
-      ${draft.exercises.map((e, i) => `
-        <div class="card tpl-ex-card ${e.supersetId ? 'ss' : ''}">${e.supersetId && !(draft.exercises[i - 1] && draft.exercises[i - 1].supersetId === e.supersetId) ? '<span class="ss-label">SUPERSET</span>' : ''}
-          <div class="ex-head">${exThumb(EX.get(e.exerciseId))}<div class="ex-info"><h3>${esc(exName(e.exerciseId))}</h3></div>
-            <button class="icon-btn" data-action="tpl-ex-menu" data-i="${i}">${ICON.more}</button></div>
-          <div class="tpl-params">
-            <div class="param"><span>Séries</span><div class="stepper">
-              <button data-action="tpl-sets" data-i="${i}" data-d="-1">−</button><b>${e.targetSets}</b><button data-action="tpl-sets" data-i="${i}" data-d="1">+</button></div></div>
-            <div class="param"><span>Reps</span><input class="field sm" data-input="tpl-reps" data-change="tpl-reps-ok" data-i="${i}" value="${esc(e.targetReps ?? '')}" placeholder="8-12" autocomplete="off"></div>
-            <div class="param"><span>Repos</span><button class="chip-sm" data-action="tpl-rest" data-i="${i}">${ICON.timer}${fmtClock(e.restTime)}</button></div>
+    render: () => {
+      const folder = S.data.folders.find(f => f.id === draft.folderId);
+      return `
+        <div class="te-head"><div class="wh-card">
+          <div class="wh-top">
+            <button class="circle-btn" data-action="te-close" aria-label="Fermer">${ICON.close}</button>
+            <div class="wh-title"><span class="live-k edit">${ICON.pen}SÉANCE · POUR PLUS TARD</span>
+              <input class="te-name" data-input="te-name" value="${esc(draft.name)}" placeholder="Nom de la séance" autocomplete="off" enterkeyhint="done"></div>
+            <button class="circle-btn" data-action="te-menu" aria-label="Options">${ICON.more}</button>
           </div>
-        </div>`).join('') || '<p class="empty-sm">Ajoute des exercices à ta séance.</p>'}
-      <button class="btn-soft wide" data-action="tpl-add">${ICON.plus}<span>Ajouter des exercices</span></button>
-      ${src ? `<button class="btn-primary" data-action="tpl-start">${ICON.play} Démarrer cette séance</button>
-               <button class="btn-plain" data-action="tpl-dup">Dupliquer</button>
-               <button class="btn-plain danger" data-action="tpl-del">Supprimer la séance</button>` : ''}`,
-    changes: { 'tpl-reps-ok': el => { if (el.value && !parseRange(el.value)) { toast('Reps : un nombre (10) ou une fourchette (8-12)'); el.value = draft.exercises[+el.dataset.i].targetReps || ''; } } },
+          <div class="wh-stats">
+            <div class="wh-cell"><span>EXOS</span><b>${draft.exercises.length}</b></div>
+            <div class="wh-cell"><span>SÉRIES</span><b>${tplSetCount(draft)}</b></div>
+            <div class="wh-cell"><span>~DURÉE</span><b>~${fmtDurLong(estimateDuration(draft))}</b></div>
+          </div>
+          <button class="te-folder" data-action="te-folder"><span>Enregistrer dans · ${folder ? esc(folder.name) : 'Racine'}</span>${ICON.chevR}</button>
+        </div></div>
+        <div class="dnd-list" data-dnd="tex">${draft.exercises.map((e, i) => e.kind === 'circuit' ? circuitCard(e, i) : exCard(e, i)).join('')}</div>
+        ${draft.exercises.length ? '' : emptyState(EQ_ICON.halteres, 'Ajoute les exercices de ta séance, ou un circuit.')}
+        <div class="w-add-row">
+          <button class="dash-btn" data-action="te-add">${ICON.plus}Exercice</button>
+          <button class="dash-btn purple" data-action="te-add-circuit">${ICON.plus}Circuit</button>
+        </div>`;
+    },
+    footer: () => `<button class="btn-out" data-action="te-save">Enregistrer</button><button class="btn-go2" data-action="te-start">Démarrer</button>`,
     inputs: {
-      'tpl-name': el => { draft.name = el.value; },
-      'tpl-folder': el => { draft.folderId = el.value || null; },
-      'tpl-reps': el => { const r = parseRange(el.value); draft.exercises[+el.dataset.i].targetReps = r ? r.text : null; }
+      'te-name': el => { draft.name = el.value; touch(); },
+      'te-w': el => { const v = parseNum(el.value); setAtT(el).weight = v == null ? null : fromU(v); touch(); },
+      'te-r': el => { setAtT(el).reps = el.value.trim() || null; touch(); }
+    },
+    changes: {
+      'te-r-ok': el => {
+        const s = setAtT(el);
+        if (!el.value.trim()) { s.reps = null; return; }
+        const r = parseRange(el.value);
+        if (!r) { toast('Reps : un nombre (10) ou une fourchette (8-12)'); s.reps = null; el.value = ''; return; }
+        s.reps = r.text; el.value = r.text;
+      }
     },
     actions: {
-      'tpl-save': async () => {
-        if (!draft.name.trim()) { toast('Donne un nom à ta séance'); $('.field', pg.el)?.focus(); return; }
-        draft.name = draft.name.trim();
-        await save('templates', draft);
-        popPage(); refreshAll(); toast('Séance enregistrée');
+      'te-close': async () => {
+        if (dirty && !await confirmSheet('Quitter sans enregistrer ?', 'Tes modifications seront perdues.', 'Quitter', true)) return;
+        popPage();
       },
-      'tpl-add': () => openPicker(ids => {
-        ids.forEach(exId => draft.exercises.push({ exerciseId: exId, restTime: S.settings.restTimerDefault, targetSets: 3, targetReps: '10', tempo: '' }));
-        renderPage(pg);
+      'te-save': () => saveDraft(true),
+      'te-start': async () => { if (await saveDraft(false)) ACTIONS['start-template']({ dataset: { id: draft.id } }); },
+      'te-folder': () => actionSheet('Enregistrer dans', [
+        { label: 'Racine (aucun dossier)', fn: () => { draft.folderId = null; rerender(); } },
+        ...sortedFolders().map(f => ({ label: f.name, icon: ICON.folder, fn: () => { draft.folderId = f.id; rerender(); } })),
+        { label: 'Nouveau dossier…', icon: ICON.plus, fn: async () => { const n = await inputSheet('Nouveau dossier', '', 'Ex. : PPL + Upper', 'Créer'); if (!n) return; const f = { id: uid(), name: n, order: S.data.folders.length }; await save('folders', f); draft.folderId = f.id; rerender(); } }
+      ]),
+      'te-menu': () => actionSheet(draft.name || 'Séance', [
+        { label: 'Démarrer', icon: ICON.play, fn: () => pg.actions['te-start']() },
+        { label: 'Ajouter un exercice', fn: () => pg.actions['te-add']() },
+        { label: 'Ajouter un circuit', fn: () => pg.actions['te-add-circuit']() },
+        ...(src ? [
+          { label: 'Dupliquer', fn: async () => { const copy = normalizeTpl({ ...JSON.parse(JSON.stringify(draft)), id: uid(), name: (draft.name || 'Séance') + ' (copie)' }); await save('templates', copy); popPage(); refreshAll(); toast('Séance dupliquée'); } },
+          { label: 'Supprimer la séance', danger: true, fn: async () => { if (!await confirmSheet('Supprimer cette séance ?', 'L\'historique des entraînements est conservé.', 'Supprimer', true)) return; await removeItem('templates', draft.id); popPage(); refreshAll(); } }
+        ] : [])
+      ]),
+      'te-add': () => openPicker(ids => {
+        ids.forEach(exId => draft.exercises.push({ exerciseId: exId, restTime: S.settings.restTimerDefault, tempo: '', supersetId: null, sets: [0, 1, 2].map(() => ({ type: 'normal', weight: null, reps: '10' })) }));
+        rerender();
+        setTimeout(() => { const b = $('.page-body', pg.el); b && b.scrollTo({ top: b.scrollHeight, behavior: 'smooth' }); }, 60);
       }),
-      'tpl-sets': el => {
-        const e = draft.exercises[+el.dataset.i];
-        e.targetSets = clamp(e.targetSets + +el.dataset.d, 1, 12);
-        renderPage(pg);
+      'te-add-circuit': () => circuitConfigSheet(null, c => { draft.exercises.push(c); rerender(); }),
+      'te-note': el => editExerciseNote(exAt(el).exerciseId, () => renderPage(pg)),
+      'te-rest': async el => { const e = exAt(el); const v = await restPickerSheet(e.restTime); if (v != null) { e.restTime = v; rerender(); } },
+      'te-tempo': async el => { const e = exAt(el); const v = await inputSheet('Tempo', e.tempo || '', 'Ex. : 3-1-1-0 (descente-pause-montée-pause)'); if (v != null) { e.tempo = v; rerender(); } },
+      'te-nsets': el => {
+        const e = exAt(el);
+        const sh = openSheet({
+          html: `<div class="dialog"><h3>Nombre de séries</h3><div class="grid-opts">${Array.from({ length: 10 }, (_, k) => k + 1).map(n => `<button class="opt-pill ${e.sets.length === n ? 'on' : ''}" data-action="pick" data-v="${n}">${n}</button>`).join('')}</div>
+            <button class="btn-plain" data-action="sheet-close">Annuler</button></div>`,
+          actions: {
+            pick: b => {
+              const n = +b.dataset.v;
+              while (e.sets.length < n) { const last = e.sets[e.sets.length - 1]; e.sets.push(last ? { ...last, type: last.type === 'warmup' ? 'normal' : last.type } : { type: 'normal', weight: null, reps: '10' }); }
+              e.sets.length = n;
+              sh.close(); rerender();
+            }
+          }
+        });
       },
-      'tpl-rest': async el => {
-        const e = draft.exercises[+el.dataset.i];
-        const v = await restPickerSheet(e.restTime);
-        if (v != null) { e.restTime = v; renderPage(pg); }
+      'te-add-set': el => { const e = exAt(el); const last = e.sets[e.sets.length - 1]; e.sets.push(last ? { ...last, type: last.type === 'warmup' ? 'normal' : last.type } : { type: 'normal', weight: null, reps: '10' }); rerender(); },
+      'te-type': el => {
+        const s = setAtT(el);
+        actionSheet('Type de série', Object.entries(SET_TYPES).map(([k, v]) => ({ label: v.label + (s.type === k ? ' ✓' : ''), fn: () => { s.type = k; rerender(); } })));
       },
-      'tpl-ex-menu': el => {
-        const i = +el.dataset.i;
-        actionSheet(exName(draft.exercises[i].exerciseId), [
-          ...(i > 0 ? [{ label: 'Monter', fn: () => { const a = draft.exercises;[a[i - 1], a[i]] = [a[i], a[i - 1]]; renderPage(pg); } }] : []),
-          ...(i < draft.exercises.length - 1 ? [{ label: 'Descendre', fn: () => { const a = draft.exercises;[a[i + 1], a[i]] = [a[i], a[i + 1]]; renderPage(pg); } }] : []),
-          ...(i < draft.exercises.length - 1 && !(draft.exercises[i].supersetId && draft.exercises[i + 1].supersetId === draft.exercises[i].supersetId)
-            ? [{ label: 'Superset avec l\'exercice suivant', fn: () => { const sid = draft.exercises[i].supersetId || draft.exercises[i + 1].supersetId || uid(); draft.exercises[i].supersetId = sid; draft.exercises[i + 1].supersetId = sid; renderPage(pg); } }] : []),
-          ...(draft.exercises[i].supersetId ? [{ label: 'Retirer du superset', fn: () => { draft.exercises[i].supersetId = null; cleanSupersets(draft.exercises); renderPage(pg); } }] : []),
-          { label: 'Tempo', fn: async () => { const v = await inputSheet('Tempo', draft.exercises[i].tempo || '', 'Ex. : 3-1-1-0'); if (v != null) { draft.exercises[i].tempo = v; renderPage(pg); } } },
-          { label: 'Retirer l\'exercice', danger: true, fn: () => { draft.exercises.splice(i, 1); cleanSupersets(draft.exercises); renderPage(pg); } }
+      'te-set-menu': el => {
+        const e = exAt(el), j = +el.dataset.j, s = e.sets[j];
+        actionSheet(`Série ${setLabel(e, j)}`, [
+          ...Object.entries(SET_TYPES).filter(([k]) => k !== (s.type || 'normal')).map(([k, v]) => ({ label: v.label, fn: () => { s.type = k; rerender(); } })),
+          { label: 'Dupliquer la série', fn: () => { e.sets.splice(j + 1, 0, { ...s }); rerender(); } },
+          ...(e.sets.length > 1 ? [{ label: 'Supprimer la série', danger: true, fn: () => { e.sets.splice(j, 1); rerender(); } }] : [])
         ]);
       },
-      'tpl-start': async () => {
-        if (draft.name.trim()) await save('templates', draft);
-        popPage(); refreshAll();
-        ACTIONS['start-template']({ dataset: { id: draft.id } });
+      'te-ex-menu': el => {
+        const i = +el.dataset.i, e = draft.exercises[i], next = draft.exercises[i + 1];
+        const canSS = next && next.kind !== 'circuit' && !(e.supersetId && next.supersetId === e.supersetId);
+        const move = d => { [draft.exercises[i + d], draft.exercises[i]] = [draft.exercises[i], draft.exercises[i + d]]; rerender(); };
+        actionSheet(exName(e.exerciseId), [
+          { label: 'Reps pour toutes les séries', fn: async () => { const v = await inputSheet('Répétitions visées', e.sets.find(isWork)?.reps || '', 'Ex. : 10 ou 8-12'); if (v == null) return; const r = parseRange(v); if (v && !r) { toast('Format : 10 ou 8-12'); return; } e.sets.forEach(s => { if (isWork(s)) s.reps = r ? r.text : null; }); rerender(); } },
+          { label: `Charge pour toutes les séries (${unit()})`, fn: async () => { const v = await inputSheet(`Charge (${unit()})`, '', 'Ex. : 60'); if (v == null) return; const n = parseNum(v); e.sets.forEach(s => { if (isWork(s)) s.weight = n == null ? null : fromU(n); }); rerender(); } },
+          ...(canSS ? [{ label: 'Superset avec l\'exercice suivant', fn: () => { const sid = e.supersetId || next.supersetId || uid(); e.supersetId = sid; next.supersetId = sid; rerender(); } }] : []),
+          ...(e.supersetId ? [{ label: 'Retirer du superset', fn: () => { e.supersetId = null; cleanSupersets(draft.exercises); rerender(); } }] : []),
+          { label: 'Remplacer l\'exercice', fn: () => openPicker(ids => { e.exerciseId = ids[0]; rerender(); }) },
+          { label: 'Historique de l\'exercice', fn: () => openExerciseDetail(e.exerciseId) },
+          ...(i > 0 ? [{ label: 'Monter', fn: () => move(-1) }] : []),
+          ...(i < draft.exercises.length - 1 ? [{ label: 'Descendre', fn: () => move(1) }] : []),
+          { label: 'Retirer l\'exercice', danger: true, fn: () => { draft.exercises.splice(i, 1); cleanSupersets(draft.exercises); rerender(); } }
+        ]);
       },
-      'tpl-dup': async () => {
-        const copy = { ...JSON.parse(JSON.stringify(draft)), id: uid(), name: draft.name + ' (copie)' };
-        await save('templates', copy); popPage(); refreshAll(); toast('Séance dupliquée');
+      'te-c-menu': el => {
+        const i = +el.dataset.i, c = draft.exercises[i];
+        actionSheet(c.name, [
+          { label: 'Modifier le format', fn: () => circuitConfigSheet(c, () => rerender()) },
+          { label: 'Supprimer le circuit', danger: true, fn: () => { draft.exercises.splice(i, 1); rerender(); } }
+        ]);
       },
-      'tpl-del': async () => {
-        if (!await confirmSheet('Supprimer cette séance ?', 'L\'historique des entraînements est conservé.', 'Supprimer', true)) return;
-        await removeItem('templates', draft.id); popPage(); refreshAll();
-      }
+      'te-c-item': el => circuitItemSheet(exAt(el), +el.dataset.k, () => rerender()),
+      'te-c-add': el => { const c = exAt(el); openPicker(ids => { ids.forEach(x => c.items.push({ exerciseId: x, reps: '10', weight: null })); rerender(); }); }
     }
   });
+  S.tplEdit = { draft, pg, touch };
+
+  async function saveDraft(close) {
+    if (!draft.name.trim()) { toast('Donne un nom à ta séance'); $('.te-name', pg.el)?.focus(); return false; }
+    draft.name = draft.name.trim();
+    normalizeTpl(draft);
+    await save('templates', draft);
+    dirty = false;
+    if (close) { popPage(); toast('Séance enregistrée'); }
+    refreshAll();
+    return true;
+  }
 }
 
 /* ================= 7. BIBLIOTHÈQUE D'EXERCICES =========================== */
@@ -1281,14 +1451,20 @@ async function startWorkout(spec) {
     startTime: spec.startTime || Date.now(), minimized: false, rest: null, restReady: null,
     pausedAt: null, pausedTotal: 0,
     manual: !!spec.manual, durationMin: spec.durationMin || null,
-    exercises: spec.exercises.filter(e => EX.has(e.exerciseId)).map(e => ({
-      exerciseId: e.exerciseId,
-      restTime: e.restTime ?? S.settings.restTimerDefault,
-      tempo: e.tempo || '',
-      targetReps: e.targetReps != null && e.targetReps !== '' ? String(e.targetReps) : null,
-      supersetId: e.supersetId || null,
-      sets: Array.from({ length: e.nSets || 3 }, (_, k) => newSet(k + 1))
-    }))
+    exercises: spec.exercises.filter(e => e.kind === 'circuit' || EX.has(e.exerciseId)).map(e => e.kind === 'circuit'
+      ? { ...JSON.parse(JSON.stringify(e)), id: uid(), done: 0, lastKey: null, t: { start: null, pausedAt: null, pausedTotal: 0 } }
+      : {
+        exerciseId: e.exerciseId,
+        restTime: e.restTime ?? S.settings.restTimerDefault,
+        tempo: e.tempo || '',
+        targetReps: e.targetReps != null && e.targetReps !== '' ? String(e.targetReps) : null,
+        supersetId: e.supersetId || null,
+        // séries cibles de la séance type : type, charge et reps visées par série
+        sets: (e.plan || Array.from({ length: e.nSets || 3 }, () => null)).map((p, k) => ({
+          ...newSet(k + 1), type: (p && p.type) || 'normal',
+          target: p && (p.weight != null || p.reps) ? { weight: p.weight ?? null, reps: p.reps || null } : null
+        }))
+      })
   };
   persistActive();
   while (pages.length) popPage();
@@ -1305,11 +1481,12 @@ function elapsedSec(a = S.active) {
 
 /** Valeurs proposées pour une série : charge de la séance précédente, reps cibles */
 function placeholderFor(ex, j, prev) {
+  const tg = ex.sets[j] && ex.sets[j].target;
   const p = prev[j] || (j > 0 ? ex.sets[j - 1] : null) || prev[prev.length - 1];
-  const range = parseRange(ex.targetReps);
+  const range = parseRange(tg && tg.reps ? tg.reps : ex.targetReps);
   const pReps = p && p.reps != null ? p.reps : null;
   return {
-    weight: p && p.weight != null ? p.weight : null,
+    weight: tg && tg.weight != null ? tg.weight : (p && p.weight != null ? p.weight : null),
     reps: range ? range.text : pReps,
     repsFill: pReps != null && (!range || (pReps >= range.min && pReps <= range.max)) ? pReps : (range ? range.min : null)
   };
@@ -1408,10 +1585,11 @@ function exerciseBlock(ex, i, cur) {
   const ss = !!ex.supersetId;
   const ssFirst = ss && !(prevEx && prevEx.supersetId === ex.supersetId);
   const ssLast = ss && !(nextEx && nextEx.supersetId === ex.supersetId);
+  const firstOpen = ex.sets.findIndex(x => !x.completed);
   const rows = ex.sets.map((s, j) => {
     const p = prev[j];
     const ph = placeholderFor(ex, j, prev);
-    const isCur = cur && cur[0] === i && cur[1] === j;
+    const isCur = j === firstOpen;
     const t = s.type || 'normal';
     return `<div class="set-row ${s.completed ? 'done' : ''} ${isCur ? 'cur' : ''} t-${t}">
       <button class="set-num" data-action="w-set-menu" data-ex="${i}" data-set="${j}">${setLabel(ex, j)}${t === 'drop' || t === 'failure' ? `<sup>${SET_TYPES[t].short}</sup>` : ''}</button>
@@ -1515,7 +1693,8 @@ ACTIONS['w-check'] = el => {
 
 ACTIONS['w-add-set'] = el => {
   const ex = S.active.exercises[+el.dataset.ex];
-  ex.sets.push(newSet(ex.sets.length + 1));
+  const last = ex.sets[ex.sets.length - 1];
+  ex.sets.push({ ...newSet(ex.sets.length + 1), type: last && last.type !== 'warmup' ? last.type : 'normal', target: last ? last.target || null : null });
   persistActive(); renderWorkout();
 };
 
@@ -1822,7 +2001,16 @@ function circuitBlock(c, i) {
 /** Création / modification d'un circuit */
 ACTIONS['w-add-circuit'] = () => openCircuitForm(null);
 function openCircuitForm(idx) {
-  const c0 = idx == null ? null : S.active.exercises[idx];
+  circuitConfigSheet(idx == null ? null : S.active.exercises[idx], (c, isNew) => {
+    if (isNew) {
+      S.active.exercises.push({ ...c, done: 0, t: { start: null, pausedAt: null, pausedTotal: 0 } });
+      setTimeout(() => { const b = $('.w-body'); b && b.scrollTo({ top: b.scrollHeight, behavior: 'smooth' }); }, 50);
+    } else c.lastKey = null;
+    persistActive(); renderWorkout();
+  });
+}
+/** Formulaire de circuit. onDone(circuit, estNouveau) */
+function circuitConfigSheet(c0, onDone) {
   const d = c0 ? { format: c0.format, rounds: c0.rounds, work: c0.work, rest: c0.rest, minutes: c0.minutes, name: c0.name }
     : { format: 'amrap', rounds: 3, work: 40, rest: 20, minutes: 15, name: 'Circuit' };
   const num = (k, label, unitTxt) => `<label class="form-row"><span>${label}</span><input inputmode="numeric" data-input="cf-num" data-k="${k}" value="${d[k]}"><em>${unitTxt}</em></label>`;
@@ -1849,12 +2037,8 @@ function openCircuitForm(idx) {
         d.work = clamp(d.work || 1, 1, 600); d.rest = clamp(d.rest || 0, 0, 600);
         d.name = d.name.trim() || 'Circuit';
         sh.close();
-        if (c0) { Object.assign(c0, d); c0.lastKey = null; persistActive(); renderWorkout(); return; }
-        openPicker(ids => {
-          S.active.exercises.push({ kind: 'circuit', id: uid(), ...d, done: 0, items: ids.map(id => ({ exerciseId: id, reps: '10', weight: null })), t: { start: null, pausedAt: null, pausedTotal: 0 } });
-          persistActive(); renderWorkout();
-          setTimeout(() => { const b = $('.w-body'); b && b.scrollTo({ top: b.scrollHeight, behavior: 'smooth' }); }, 50);
-        });
+        if (c0) { Object.assign(c0, d); onDone(c0, false); return; }
+        openPicker(ids => onDone({ kind: 'circuit', id: uid(), ...d, items: ids.map(x => ({ exerciseId: x, reps: '10', weight: null })) }, true));
       }
     }
   });
@@ -1878,8 +2062,10 @@ ACTIONS['c-add'] = el => {
   const c = circAt(el);
   openPicker(ids => { ids.forEach(id => c.items.push({ exerciseId: id, reps: '10', weight: null })); persistActive(); renderWorkout(); });
 };
-ACTIONS['c-item'] = el => {
-  const c = circAt(el), k = +el.dataset.k, it = c.items[k];
+ACTIONS['c-item'] = el => circuitItemSheet(circAt(el), +el.dataset.k, () => { persistActive(); renderWorkout(); });
+/** Réglage d'un exercice de circuit (reps, charge, ordre) */
+function circuitItemSheet(c, k, onDone) {
+  const it = c.items[k];
   const sh = openSheet({
     html: `<div class="dialog left"><h3>${esc(exName(it.exerciseId))}</h3>
       <div class="card list-card form-list">
@@ -1894,12 +2080,12 @@ ACTIONS['c-item'] = el => {
       </div></div>`,
     inputs: { 'ci-reps': e2 => { it.reps = e2.value.trim(); }, 'ci-w': e2 => { const v = parseNum(e2.value); it.weight = v ? fromU(v) : null; } },
     actions: {
-      'ci-ok': () => { sh.close(); persistActive(); renderWorkout(); },
-      'ci-up': () => { [c.items[k - 1], c.items[k]] = [c.items[k], c.items[k - 1]]; sh.close(); persistActive(); renderWorkout(); },
-      'ci-del': () => { c.items.splice(k, 1); sh.close(); persistActive(); renderWorkout(); }
+      'ci-ok': () => { sh.close(); onDone(); },
+      'ci-up': () => { [c.items[k - 1], c.items[k]] = [c.items[k], c.items[k - 1]]; sh.close(); onDone(); },
+      'ci-del': () => { c.items.splice(k, 1); sh.close(); onDone(); }
     }
   });
-};
+}
 ACTIONS['c-menu'] = el => {
   const i = +el.dataset.ex, c = S.active.exercises[i];
   actionSheet(c.name, [
@@ -2057,7 +2243,7 @@ async function saveWorkout({ name, makeTemplate }) {
   if (makeTemplate) {
     await save('templates', {
       id: uid(), name: w.name, folderId: null,
-      exercises: w.exercises.map(ex => ({ exerciseId: ex.exerciseId, restTime: ex.restTime, tempo: ex.tempo, supersetId: ex.supersetId || null, targetSets: ex.sets.length, targetReps: ex.targetReps || String(ex.sets[0]?.reps || 10) }))
+      exercises: w.exercises.map(ex => normalizeTpl({ exercises: [{ exerciseId: ex.exerciseId, restTime: ex.restTime, tempo: ex.tempo, supersetId: ex.supersetId || null, sets: ex.sets.map(x => ({ type: x.type || 'normal', weight: x.weight, reps: ex.targetReps || String(x.reps) })) }] }).exercises[0])
     });
   }
   stopRest();
