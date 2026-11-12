@@ -1084,3 +1084,17 @@ label.btn-soft { cursor: pointer; }
 .mc.mc-e { background: transparent; }
 .months { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .mgrid { grid-template-columns: repeat(7, minmax(0, 1fr)); }
+
+/* Statistiques : par séance / par exercice */
+.br-row { display: flex; align-items: center; gap: 10px; width: 100%; padding: 11px 0; text-align: left; border-bottom: .5px solid var(--line); }
+.br-row:last-child { border: 0; }
+.br-row .ex-thumb { width: 36px; height: 36px; border-radius: 10px; }
+.br-row .ex-thumb svg { width: 20px; height: 20px; }
+.cond-b { font-family: var(--font-cond); font-weight: 700; font-size: 18px; }
+.d-pill { flex-shrink: 0; padding: 4px 8px; border-radius: 9px; font-size: 12.5px; font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.d-pill.up { background: var(--accent-soft); color: var(--accent-2); }
+.d-pill.down { background: #FDE3E1; color: #C2352B; }
+.d-pill.flat { background: var(--card-2); color: var(--text-2); }
+.d-pill.new { background: var(--rec-soft); color: var(--rec); font-weight: 600; }
+:root[data-theme="dark"] .d-pill.down { background: #3B1512; color: #FF8A80; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .d-pill.down { background: #3B1512; color: #FF8A80; } }

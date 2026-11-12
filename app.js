@@ -26,7 +26,7 @@ const cap = s => s.charAt(0).toUpperCase() + s.slice(1);
 const norm = s => String(s).normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
 const DAY = 864e5;
 /** Version affichée dans Réglages (à augmenter à chaque mise en ligne) */
-const APP_VERSION = '1.7';
+const APP_VERSION = '1.8';
 
 const MONTHS = ['Janvier', 'Février', 'Mars', 'Avril', 'Mai', 'Juin', 'Juillet', 'Août', 'Septembre', 'Octobre', 'Novembre', 'Décembre'];
 const MONTHS_SHORT = ['janv.', 'févr.', 'mars', 'avr.', 'mai', 'juin', 'juil.', 'août', 'sept.', 'oct.', 'nov.', 'déc.'];
@@ -130,7 +130,7 @@ const S = {
   tplSearch: false, tplQuery: '',   // recherche dans l'onglet Séances         // nombre de séances affichées dans l'historique
   measPeriod: '3 mois',
   musPeriod: '8S', musMetric: 'sets',          // détail par muscle
-  statsOffset: 0, statsCustom: null, statsMetric: 'volume',
+  statsOffset: 0, statsCustom: null, statsMetric: 'volume', statsExMetric: 'e1rm', statsExAll: false,
   exMetric: 'e1rm', exPeriod: 'Tout'            // fiche exercice
 };
 let EX = new Map(); // index id -> exercice
@@ -2363,6 +2363,50 @@ ACTIONS['open-stats'] = () => {
       const catTotal = catList.reduce((a, x) => a + x[1], 0) || 1;
       const y1 = new Date(from).getFullYear() !== new Date(end - DAY).getFullYear() || new Date(from).getFullYear() !== new Date().getFullYear();
       const label = d => fmtDateShort(d) + (y1 ? ' ' + new Date(d).getFullYear() : '');
+      // --- Par séance : volume moyen sur la période vs période précédente ---
+      const byGroup = (list) => { const m = {}; list.forEach(w => { const k = groupKeyOf(w); (m[k] ||= []).push(w); }); return m; };
+      const gCur = byGroup(ws), gPrev = byGroup(pws);
+      const avgVol = list => list.reduce((a, w) => a + wStats(w).volume, 0) / list.length;
+      const sessRows = Object.entries(gCur).map(([k, list]) => {
+        const a = avgVol(list), pl = gPrev[k];
+        const d = pl && pl.length ? (a - avgVol(pl)) / (avgVol(pl) || 1) * 100 : null;
+        return { k, name: list[0].name, n: list.length, a, d };
+      }).sort((x, y) => y.n - x.n || y.a - x.a);
+      // --- Par exercice : meilleur 1RM estimé (ou reps max au poids du corps) / volume moyen ---
+      const exStatsIn = list => {
+        const m = {};
+        for (const w of list) for (const ex of w.exercises) {
+          if (!ex.sets) continue;
+          const ss = ex.sets.filter(x => x.completed && isWork(x)); if (!ss.length) continue;
+          const o = m[ex.exerciseId] ||= { best: 0, reps: 0, vol: 0, n: 0 };
+          o.n++;
+          o.best = Math.max(o.best, ...ss.map(x => e1rm(x.weight, x.reps)));
+          o.reps = Math.max(o.reps, ...ss.map(x => x.reps || 0));
+          o.vol += ss.reduce((acc, x) => acc + (x.weight || 0) * (x.reps || 0), 0);
+        }
+        return m;
+      };
+      const eCur = exStatsIn(ws), ePrev = exStatsIn(pws), eBefore = exStatsIn(S.data.workouts.filter(w => w.startTime < from));
+      const exRows = Object.entries(eCur).map(([id, o]) => {
+        const bw = o.best <= 0; // exercice au poids du corps : on suit les reps max
+        let val, ref, d;
+        if (S.statsExMetric === 'volume') {
+          val = o.vol / o.n; const pr = ePrev[id];
+          ref = pr ? pr.vol / pr.n : null;
+          d = ref ? (val - ref) / ref * 100 : null;
+        } else {
+          val = bw ? o.reps : o.best;
+          const pr = ePrev[id] || eBefore[id];
+          ref = pr ? (bw ? pr.reps : pr.best) : null;
+          d = ref ? (val - ref) / ref * 100 : null;
+        }
+        return { id, o, bw, val, ref, d };
+      }).filter(r => S.statsExMetric !== 'volume' || r.val > 0)
+        .sort((x, y) => (y.d ?? -1e9) - (x.d ?? -1e9) || y.o.n - x.o.n);
+      const fmtExVal = (r, v) => S.statsExMetric === 'volume' ? fmtVol(v) : r.bw ? fmtNum(v) + ' reps' : fmtW(v, 1) + ' ' + unit();
+      const deltaPill = d => d == null ? '<span class="d-pill new">Nouveau</span>'
+        : `<span class="d-pill ${d > 0.5 ? 'up' : d < -0.5 ? 'down' : 'flat'}">${d > 0.5 ? '↗ +' : d < -0.5 ? '↘ ' : '→ '}${fmtNum(d, Math.abs(d) < 10 ? 1 : 0)} %</span>`;
+      const shownEx = S.statsExAll ? exRows : exRows.slice(0, 8);
       return `
         <p class="page-sub">${label(from)} – ${label(end - DAY)}</p>
         <div class="per-nav">
@@ -2395,13 +2439,28 @@ ACTIONS['open-stats'] = () => {
           <div class="card stat"><span>Séries</span><b>${c.sets}</b><span class="muted sm">préc. ${p.sets}</span></div>
           <div class="card stat"><span>Temps total</span><b>${fmtDur(c.dur)}</b><span class="muted sm">préc. ${fmtDur(p.dur)}</span></div>
           <div class="card stat"><span>Durée moyenne</span><b>${ws.length ? fmtDur(c.dur / ws.length) : '—'}</b></div>
-        </div>`;
+        </div>
+        <div class="section-head"><h2 class="cond">Par séance</h2><span class="mono-sm">vs période préc.</span></div>
+        ${sessRows.length ? `<div class="card list-card">${sessRows.map(r => `<button class="br-row tap" data-action="open-group" data-key="${esc(r.k)}">
+          <span class="ex-row-txt"><b class="cond-b">${esc(r.name)}</b><span class="muted sm">${r.n}× · moy. ${fmtVol(r.a)} / séance</span></span>
+          ${deltaPill(r.d)}<span class="chev-r">${ICON.chevR}</span></button>`).join('')}</div>` : '<p class="empty-sm">Aucune séance sur cette période.</p>'}
+        <div class="section-head"><h2 class="cond">Par exercice</h2>
+          <div class="seg sm mini">${[['e1rm', '1RM'], ['volume', 'Volume']].map(([k, l]) => `<button class="${S.statsExMetric === k ? 'on' : ''}" data-action="st-exm" data-v="${k}">${l}</button>`).join('')}</div></div>
+        ${exRows.length ? `<div class="card list-card">${shownEx.map(r => `<button class="br-row tap" data-action="open-exercise" data-id="${r.id}">
+          ${exThumb(EX.get(r.id))}
+          <span class="ex-row-txt"><b>${esc(exName(r.id))}</b><span class="muted sm">${S.statsExMetric === 'volume' ? 'moy. ' : r.bw ? 'max ' : '1RM '}${fmtExVal(r, r.val)}${r.ref != null ? ` · préc. ${fmtExVal(r, r.ref)}` : ''} · ${r.o.n}×</span></span>
+          ${deltaPill(r.d)}</button>`).join('')}</div>
+          ${exRows.length > 8 ? `<button class="btn-plain" data-action="st-exall">${S.statsExAll ? 'Voir moins' : `Voir tout (${exRows.length})`}</button>` : ''}
+          <p class="muted sm pad">${S.statsExMetric === 'volume' ? 'Volume moyen par séance, comparé à la période précédente.' : '1RM estimé (meilleure série) comparé à la période précédente, ou à ton dernier niveau connu. Exercices au poids du corps : répétitions max.'}</p>`
+          : '<p class="empty-sm">Aucun exercice sur cette période.</p>'}`;
     },
     actions: {
       period: el => { S.statsPeriod = el.dataset.v; S.statsCustom = null; S.statsOffset = 0; renderPage(pg); },
       'st-prev': () => { S.statsOffset++; renderPage(pg); },
       'st-next': () => { if (S.statsOffset > 0) { S.statsOffset--; renderPage(pg); } },
       'st-metric': el => { S.statsMetric = el.dataset.v; renderPage(pg); },
+      'st-exm': el => { S.statsExMetric = el.dataset.v; renderPage(pg); },
+      'st-exall': () => { S.statsExAll = !S.statsExAll; renderPage(pg); },
       'st-cal': () => {
         const r = statsRange();
         const d = { from: dayKey(r.from), to: dayKey(r.end - DAY) };
