@@ -117,7 +117,8 @@ const S = {
   openFolders: {},        // dossiers repliés/dépliés
   active: null,           // entraînement en cours
   statsPeriod: '30J',
-  histLimit: 40,         // nombre de séances affichées dans l'historique
+  histLimit: 40,
+  tplSearch: false, tplQuery: '',   // recherche dans l'onglet Séances         // nombre de séances affichées dans l'historique
   measPeriod: '3M',
   measSel: ['weight', 'waist']
 };
@@ -632,57 +633,254 @@ function lastDone(templateId) {
   return workoutsDesc().find(w => w.templateId === templateId) || null;
 }
 
+const sortedTemplates = () => [...S.data.templates].sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || a.name.localeCompare(b.name, 'fr'));
+const sortedFolders = () => [...S.data.folders].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+const GRIP = '<svg viewBox="0 0 24 24" fill="currentColor"><circle cx="9" cy="6" r="1.7"/><circle cx="15" cy="6" r="1.7"/><circle cx="9" cy="12" r="1.7"/><circle cx="15" cy="12" r="1.7"/><circle cx="9" cy="18" r="1.7"/><circle cx="15" cy="18" r="1.7"/></svg>';
+ICON.trend = svg('<path d="M4 4v16h16"/><path d="M7.5 14.5l3.5-4 3 2.5 5-6"/>');
+
 function viewSeances() {
-  const tpls = [...S.data.templates].sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || a.name.localeCompare(b.name, 'fr'));
-  const folders = [...S.data.folders].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+  return `
+    <header class="se-head">
+      <div><p class="kicker"><i></i>AUJOURD'HUI</p><h1 class="se-title">Séances</h1></div>
+      <div class="head-pill"><button class="icon-btn sm" data-action="tpl-search" aria-label="Rechercher une séance">${ICON.search}</button>${avatarBtn()}</div>
+    </header>
+    ${S.tplSearch ? `<div class="search-wrap">${ICON.search}<input class="search" type="search" id="tpl-q" placeholder="Rechercher une séance ou un exercice" data-input="tpl-q" value="${esc(S.tplQuery)}" autocomplete="off"></div>` : ''}
+    <div class="se-tiles">
+      <button class="se-tile free tap" data-action="start-free"><span class="se-play">${ICON.play}</span><span><b>Entraînement libre</b><small>Démarre direct sans plan</small></span></button>
+      <button class="se-tile tap" data-action="new-template">${ICON.plus}<b>SÉANCE</b></button>
+    </div>
+    <div id="se-list">${seancesList()}</div>`;
+}
+
+/** Dossiers + séances (re-rendu seul pendant la recherche, pour garder le clavier) */
+function seancesList() {
+  const q = S.tplSearch ? norm(S.tplQuery || '').trim() : '';
+  const match = t => !q || norm(t.name).includes(q) || t.exercises.some(e => norm(exName(e.exerciseId)).includes(q));
+  const tpls = sortedTemplates().filter(match);
+  const folders = sortedFolders();
   const folderIds = new Set(folders.map(f => f.id));
   const loose = tpls.filter(t => !t.folderId || !folderIds.has(t.folderId));
+  const canDrag = !q; // pas de glisser-déposer pendant une recherche
 
-  let html = `
-    <header class="big-head"><h1>Séances</h1>
-      <span class="head-actions"><button class="round-btn" data-action="new-template" aria-label="Nouvelle séance">${ICON.plus}</button>${avatarBtn()}</span></header>
-    <div class="card free-card">
-      <div><h3>Entraînement libre</h3><p class="muted sm">Démarre une séance vide et ajoute tes exercices au fil de l'eau.</p></div>
-      <button class="btn-start" data-action="start-free">${ICON.play}<span>Démarrer</span></button>
-    </div>
-    <div class="row-actions">
-      <button class="btn-soft" data-action="new-template">${ICON.plus}<span>Nouvelle séance</span></button>
-      <button class="btn-soft" data-action="new-folder">${ICON.folder}<span>Nouveau dossier</span></button>
-    </div>`;
-
+  let html = `<div class="se-label"><span>MES DOSSIERS</span><button class="new-pill" data-action="new-folder">${ICON.folder}NOUVEAU</button></div>
+    <div class="dnd-list" data-dnd="folders">`;
   for (const f of folders) {
     const list = tpls.filter(t => t.folderId === f.id);
-    const open = S.openFolders[f.id] !== false;
-    html += `<section class="folder ${open ? 'open' : ''}">
-      <div class="folder-head">
+    const total = S.data.templates.filter(t => t.folderId === f.id).length;
+    if (q && !list.length) continue;
+    const open = q ? true : S.openFolders[f.id] !== false;
+    html += `<section class="folder ${open ? 'open' : ''}" data-drag-id="${f.id}" data-kind="folder">
+      <div class="folder-card">
+        ${canDrag ? `<span class="drag-h" aria-label="Déplacer le dossier">${GRIP}</span>` : '<span class="drag-sp"></span>'}
         <button class="folder-toggle" data-action="folder-toggle" data-id="${f.id}">
-          <span class="folder-ic">${ICON.folder}</span><span class="folder-name">${esc(f.name)}</span>
-          <span class="count">${list.length}</span><span class="chev">${ICON.chevD}</span></button>
-        <button class="icon-btn" data-action="folder-menu" data-id="${f.id}" aria-label="Options du dossier">${ICON.more}</button>
+          <span class="chev">${ICON.chevD}</span><span class="folder-ic">${ICON.folder}</span>
+          <span class="folder-txt"><b>${esc(f.name)}</b><small>${total} séance${total > 1 ? 's' : ''}</small></span></button>
+        <button class="icon-btn sm" data-action="folder-menu" data-id="${f.id}" aria-label="Options du dossier">${ICON.more}</button>
+        <button class="mini-plus" data-action="folder-add" data-id="${f.id}" aria-label="Nouvelle séance dans ce dossier">${ICON.plus}</button>
       </div>
-      <div class="folder-body">${list.map(templateCard).join('') || '<p class="empty-sm">Dossier vide — crée une séance et range-la ici.</p>'}</div>
+      <div class="folder-body dnd-list" data-dnd="tpl" data-folder="${f.id}">${list.map(t => templateCard(t, canDrag)).join('') || '<p class="empty-sm">Dossier vide — glisse une séance ici ou touche « + ».</p>'}</div>
     </section>`;
   }
-
-  html += `<div class="section-head"><h2>Mes séances</h2></div>`;
-  html += loose.length ? loose.map(templateCard).join('') : `<p class="empty-sm">Aucune séance hors dossier.</p>`;
+  html += `</div>`;
+  if (!folders.length) html += `<p class="empty-sm">Aucun dossier. Crée-en un pour ranger tes séances (ex. : PPL + Upper).</p>`;
+  html += `<div class="se-label mt"><span>MES SÉANCES</span></div>
+    <div class="dnd-list" data-dnd="tpl" data-folder="">${loose.map(t => templateCard(t, canDrag)).join('') || `<p class="empty-sm">${q ? 'Aucune séance trouvée.' : 'Aucune séance hors dossier.'}</p>`}</div>`;
   html += `<button class="card list-link tap" data-action="open-library"><span class="ll-ic">${ICON.book}</span><span>Bibliothèque d'exercices</span><span class="muted">${S.data.exercises.length}</span>${ICON.chevR}</button>`;
   return html;
 }
 
-function templateCard(t) {
+function templateCard(t, canDrag = true) {
   const last = lastDone(t.id);
   const n = t.exercises.length;
-  const names = t.exercises.slice(0, 3).map(e => exName(e.exerciseId)).join(' · ') + (n > 3 ? ` +${n - 3}` : '');
-  return `<div class="card tpl-card tap" data-action="edit-template" data-id="${t.id}">
-    <div class="tpl-main">
-      <h3>${esc(t.name)}</h3>
-      <p class="tpl-ex">${esc(names) || 'Aucun exercice'}</p>
-      <div class="tpl-meta"><span>${n} exo${n > 1 ? 's' : ''}</span><span>~${estimateDuration(t)} min</span><span>${last ? relDay(last.startTime) : 'Jamais faite'}</span></div>
+  const names = t.exercises.map(e => exName(e.exerciseId)).join(', ');
+  return `<div class="tpl-card2" data-drag-id="${t.id}" data-kind="tpl">
+    <div class="tpl-top">
+      ${canDrag ? `<span class="drag-h" aria-label="Déplacer la séance">${GRIP}</span>` : '<span class="drag-sp"></span>'}
+      <button class="tpl-head" data-action="edit-template" data-id="${t.id}"><b>${esc(t.name)}</b>
+        <small>${n} exo${n > 1 ? 's' : ''} · ~${estimateDuration(t)} min · ${last ? 'fait ' + fmtDateShort(last.startTime) : 'jamais faite'}</small></button>
+      <button class="sq-btn" data-action="tpl-stats" data-id="${t.id}" aria-label="Progression de la séance">${ICON.trend}</button>
+      <button class="icon-btn sm" data-action="tpl-menu" data-id="${t.id}" aria-label="Options de la séance">${ICON.more}</button>
     </div>
-    <button class="btn-start sm" data-action="start-template" data-id="${t.id}">${ICON.play}<span>Démarrer</span></button>
+    <p class="tpl-exlist" data-action="edit-template" data-id="${t.id}">${esc(names) || 'Aucun exercice — touche pour en ajouter.'}</p>
+    ${last ? `<button class="last-box tap" data-action="open-summary" data-id="${last.id}"><span class="lb-bar"></span>
+      <span><small>DERNIER ENTRAÎNEMENT</small><b>${fmtDateShort(last.startTime)} · voir le récap</b></span>${ICON.chevR}</button>` : ''}
+    <button class="btn-go" data-action="start-template" data-id="${t.id}">${ICON.play}Démarrer</button>
   </div>`;
 }
+
+ACTIONS['tpl-search'] = () => {
+  S.tplSearch = !S.tplSearch;
+  if (!S.tplSearch) S.tplQuery = '';
+  renderTab();
+  if (S.tplSearch) setTimeout(() => $('#tpl-q')?.focus(), 50);
+};
+INPUTS['tpl-q'] = el => { S.tplQuery = el.value; $('#se-list').innerHTML = seancesList(); };
+ACTIONS['folder-add'] = el => openTemplateEditor(null, el.dataset.id);
+ACTIONS['open-summary'] = el => { const w = S.data.workouts.find(x => x.id === el.dataset.id); if (w) showSummary(w); };
+ACTIONS['tpl-stats'] = el => openTemplateStats(el.dataset.id);
+
+/** Menu « … » d'une séance */
+ACTIONS['tpl-menu'] = el => {
+  const t = S.data.templates.find(x => x.id === el.dataset.id); if (!t) return;
+  const folder = S.data.folders.find(f => f.id === t.folderId);
+  actionSheet(t.name, [
+    { label: 'Démarrer', fn: () => ACTIONS['start-template']({ dataset: { id: t.id } }) },
+    { label: 'Modifier', fn: () => openTemplateEditor(t.id) },
+    { label: 'Voir la progression', fn: () => openTemplateStats(t.id) },
+    { label: folder ? `Déplacer (dossier : ${folder.name})` : 'Déplacer vers un dossier', fn: () => moveTemplateSheet(t) },
+    { label: 'Dupliquer', fn: async () => { await save('templates', { ...JSON.parse(JSON.stringify(t)), id: uid(), name: t.name + ' (copie)', order: (t.order ?? 0) + 0.5 }); await renumberTemplates(); renderTab(); toast('Séance dupliquée'); } },
+    { label: 'Supprimer', danger: true, fn: async () => { if (!await confirmSheet(`Supprimer « ${t.name} » ?`, 'L\'historique des entraînements est conservé.', 'Supprimer', true)) return; await removeItem('templates', t.id); renderTab(); } }
+  ]);
+};
+function moveTemplateSheet(t) {
+  actionSheet('Déplacer vers…', [
+    ...sortedFolders().filter(f => f.id !== t.folderId).map(f => ({ label: f.name, icon: ICON.folder, fn: () => moveTemplateTo(t, f.id) })),
+    ...(t.folderId ? [{ label: 'Hors dossier (Mes séances)', fn: () => moveTemplateTo(t, null) }] : [])
+  ]);
+}
+async function moveTemplateTo(t, folderId) {
+  t.folderId = folderId; t.order = 1e6; // en fin de liste
+  await save('templates', t); await renumberTemplates();
+  if (folderId) S.openFolders[folderId] = true;
+  renderTab(); toast('Séance déplacée');
+}
+/** Remet des numéros d'ordre propres (0, 1, 2…) */
+async function renumberTemplates() {
+  sortedTemplates().forEach((t, i) => { t.order = i; });
+  await DB.putMany('templates', S.data.templates);
+}
+
+/** Page « Progression » d'une séance */
+function openTemplateStats(id) {
+  const st = { metric: 'volume' };
+  const pg = pushPage({
+    title: () => S.data.templates.find(t => t.id === id)?.name || 'Progression',
+    render: () => {
+      const t = S.data.templates.find(x => x.id === id);
+      if (!t) return emptyState(ICON.trash, 'Séance supprimée.');
+      const ws = S.data.workouts.filter(w => w.templateId === id).sort((a, b) => a.startTime - b.startTime);
+      if (!ws.length) return emptyState(ICON.trend, 'Pas encore réalisée. Démarre-la pour suivre ta progression.', `<button class="btn-primary inline" data-action="start-template" data-id="${id}">${ICON.play} Démarrer</button>`);
+      const rows = ws.map(w => ({ w, ...wStats(w) }));
+      const avg = k => rows.reduce((a, r) => a + r[k], 0) / rows.length;
+      const best = rows.reduce((b, r) => r.volume > b.volume ? r : b, rows[0]);
+      const first = rows[0], last = rows[rows.length - 1];
+      const evo = first.volume ? (last.volume - first.volume) / first.volume * 100 : 0;
+      const metric = { volume: r => r.volume, duree: r => (r.w.duration || 0) / 60, series: r => r.sets }[st.metric];
+      const fmtY = { volume: v => v >= 1000 ? fmtNum(v / 1000, 1) + 't' : fmtNum(v), duree: v => fmtNum(v) + ' min', series: v => fmtNum(v) }[st.metric];
+      // Progression du 1RM estimé par exercice (1re fois -> dernière fois dans cette séance)
+      const exProg = t.exercises.map(e => {
+        const pts = ws.map(w => {
+          const sets = w.exercises.filter(x => x.exerciseId === e.exerciseId).flatMap(x => x.sets);
+          return Math.max(0, ...sets.map(s => e1rm(s.weight, s.reps)));
+        }).filter(v => v > 0);
+        if (!pts.length) return '';
+        const d = pts.length > 1 && pts[0] ? (pts[pts.length - 1] - pts[0]) / pts[0] * 100 : null;
+        return `<button class="rec-row tap" data-action="open-exercise" data-id="${e.exerciseId}">${exThumb(EX.get(e.exerciseId))}
+          <span class="ex-row-txt"><b>${esc(exName(e.exerciseId))}</b><span class="muted sm">1RM estimé : ${fmtNum(pts[0], 1)} → ${fmtNum(pts[pts.length - 1], 1)} ${unit()}</span></span>
+          ${d == null ? '' : `<span class="delta ${d >= 0 ? 'up' : 'down'}">${d >= 0 ? '▲' : '▼'} ${fmtNum(Math.abs(d))} %</span>`}</button>`;
+      }).join('');
+      return `
+        <div class="stat-grid">
+          <div class="card stat"><span>Réalisée</span><b>${ws.length}<small> fois</small></b></div>
+          <div class="card stat"><span>Dernière fois</span><b style="font-size:18px">${fmtDateShort(last.w.startTime)}</b><span class="muted sm">${relDay(last.w.startTime)}</span></div>
+          <div class="card stat"><span>Volume moyen</span><b>${fmtVol(avg('volume'))}</b>${rows.length > 1 ? `<span class="delta ${evo >= 0 ? 'up' : 'down'}">${evo >= 0 ? '▲' : '▼'} ${fmtNum(Math.abs(evo))} % depuis la 1re</span>` : ''}</div>
+          <div class="card stat"><span>Durée moyenne</span><b>${fmtDur(rows.reduce((a, r) => a + (r.w.duration || 0), 0) / rows.length)}</b></div>
+        </div>
+        <div class="card">
+          <div class="seg sm">${[['volume', 'Volume'], ['duree', 'Durée'], ['series', 'Séries']].map(([k, l]) => `<button class="${st.metric === k ? 'on' : ''}" data-action="ts-metric" data-v="${k}">${l}</button>`).join('')}</div>
+          ${rows.length > 1 ? lineChart([{ color: 'var(--accent)', points: rows.map(r => ({ x: r.w.startTime, y: metric(r) })) }], { yFmt: fmtY, area: true }) : '<p class="empty-sm">Il faut au moins deux séances pour tracer une courbe.</p>'}
+        </div>
+        <div class="card rec-card">${ICON.trophy}<div><b>Meilleure séance : ${fmtVol(best.volume)}</b><span class="muted sm">${fmtDateLong(best.w.startTime)} · ${best.sets} séries · ${fmtDur(best.w.duration)}</span></div></div>
+        ${exProg ? `<div class="section-head"><h2>Par exercice</h2></div><div class="card list-card">${exProg}</div>` : ''}
+        <div class="section-head"><h2>Historique</h2></div>
+        ${[...ws].reverse().map(workoutCard).join('')}`;
+    },
+    actions: { 'ts-metric': el => { st.metric = el.dataset.v; renderPage(pg); } }
+  });
+}
+
+/* ----- Glisser-déposer (dossiers et séances), via la poignée ⠿ ----- */
+let drag = null;
+document.addEventListener('pointerdown', e => {
+  const h = e.target.closest('.drag-h'); if (!h) return;
+  const item = h.closest('[data-drag-id]'); if (!item) return;
+  e.preventDefault();
+  const r = item.getBoundingClientRect();
+  const ph = document.createElement('div');
+  ph.className = 'drag-ph'; ph.style.height = r.height + 'px';
+  item.before(ph);
+  Object.assign(item.style, { position: 'fixed', left: r.left + 'px', top: r.top + 'px', width: r.width + 'px', margin: '0' });
+  item.classList.add('dragging');
+  document.body.classList.add('is-dragging');
+  try { h.setPointerCapture(e.pointerId); } catch (_) { }
+  drag = { item, ph, kind: item.dataset.kind, startY: e.clientY, top: r.top, y: e.clientY, scroller: $('#views') };
+  vibrate(10);
+  drag.raf = requestAnimationFrame(autoScroll);
+}, { passive: false });
+
+document.addEventListener('pointermove', e => {
+  if (!drag) return;
+  e.preventDefault();
+  drag.y = e.clientY;
+  drag.item.style.transform = `translateY(${e.clientY - drag.startY}px)`;
+  placePlaceholder();
+}, { passive: false });
+
+/** Déplace l'emplacement en pointillés selon la position du doigt */
+function placePlaceholder() {
+  const { kind, y, ph, item } = drag;
+  const lists = $$(`.dnd-list[data-dnd="${kind === 'folder' ? 'folders' : 'tpl'}"]`).filter(l => l.offsetParent !== null);
+  if (!lists.length) return;
+  // liste visée : celle qui contient le doigt, sinon la plus proche
+  let target = lists[0], bestD = Infinity;
+  for (const l of lists) {
+    const r = l.getBoundingClientRect();
+    const d = y < r.top ? r.top - y : y > r.bottom ? y - r.bottom : 0;
+    if (d < bestD || (d === 0 && l.contains(target) === false && target.contains(l))) { bestD = d; target = l; }
+  }
+  const items = [...target.children].filter(c => c.dataset.kind === kind && c !== item);
+  const before = items.find(c => { const r = c.getBoundingClientRect(); return y < r.top + r.height / 2; });
+  if (before) { if (ph.nextSibling !== before) target.insertBefore(ph, before); }
+  else if (ph.parentNode !== target || ph.nextElementSibling) target.appendChild(ph);
+}
+
+/** Défilement automatique près des bords de l'écran */
+function autoScroll() {
+  if (!drag) return;
+  const edge = 90, H = innerHeight;
+  const sp = drag.y < edge ? -(edge - drag.y) / 6 : drag.y > H - edge - 70 ? (drag.y - (H - edge - 70)) / 6 : 0;
+  if (sp) { drag.scroller.scrollTop += sp; placePlaceholder(); }
+  drag.raf = requestAnimationFrame(autoScroll);
+}
+
+async function endDrag() {
+  if (!drag) return;
+  const { item, ph, kind } = drag;
+  cancelAnimationFrame(drag.raf);
+  drag = null;
+  ph.replaceWith(item);
+  item.removeAttribute('style');
+  item.classList.remove('dragging');
+  document.body.classList.remove('is-dragging');
+  if (kind === 'folder') {
+    $$('.dnd-list[data-dnd="folders"] > [data-kind="folder"]').forEach((el, i) => { const f = S.data.folders.find(x => x.id === el.dataset.dragId); if (f) f.order = i; });
+    await DB.putMany('folders', S.data.folders);
+  } else {
+    let i = 0;
+    $$('.dnd-list[data-dnd="tpl"]').forEach(list => {
+      const fid = list.dataset.folder || null;
+      [...list.children].filter(c => c.dataset.kind === 'tpl').forEach(c => {
+        const t = S.data.templates.find(x => x.id === c.dataset.dragId);
+        if (t) { t.folderId = fid; t.order = i++; }
+      });
+    });
+    await DB.putMany('templates', S.data.templates);
+  }
+  vibrate(8);
+  renderTab();
+}
+document.addEventListener('pointerup', endDrag);
+document.addEventListener('pointercancel', endDrag);
 
 ACTIONS['start-free'] = () => startWorkout({ name: 'Entraînement libre', templateId: null, exercises: [] });
 ACTIONS['start-template'] = el => {
