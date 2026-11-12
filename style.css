@@ -770,3 +770,11 @@ body.is-dragging, body.is-dragging * { cursor: grabbing !important; }
 .se-tiles { grid-template-columns: 1.4fr 1fr; }
 .se-tile.free { padding: 0 12px; gap: 10px; }
 .se-tile.free b { font-size: 15px; white-space: nowrap; }
+
+/* Bandeau « nouvelle version » */
+#update-banner { position: fixed; left: 50%; top: calc(var(--sat) + 10px); z-index: 95; transform: translate(-50%, -160%);
+  display: flex; align-items: center; gap: 12px; padding: 10px 10px 10px 16px; border-radius: 16px; max-width: calc(100% - 32px);
+  background: var(--text); color: var(--bg); font-size: 14px; font-weight: 600; box-shadow: 0 10px 28px rgba(0, 0, 0, .22);
+  transition: transform .4s var(--ease); }
+#update-banner.show { transform: translate(-50%, 0); }
+#update-banner b { background: var(--accent); color: #fff; border-radius: 10px; padding: 6px 12px; }

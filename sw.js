@@ -1,10 +1,14 @@
 /* ==========================================================================
    GymLog — Service Worker
-   Stratégie : on pré-cache tout le "shell" de l'app à l'installation,
-   puis on sert depuis le cache (cache-first) avec mise à jour en arrière-plan.
-   Incrémenter CACHE_VERSION à chaque déploiement pour forcer la mise à jour.
+   Stratégie « réseau d'abord » :
+   - en ligne : on récupère toujours la version la plus récente (vérification
+     rapide via ETag) et on met le cache à jour ;
+   - réseau lent (> 3 s) ou hors ligne : on sert la copie en cache.
+   Ainsi une mise à jour publiée est visible dès le lancement suivant,
+   et l'app fonctionne toujours sans connexion à la salle.
+   Incrémenter CACHE_VERSION à chaque déploiement.
    ========================================================================== */
-const CACHE_VERSION = 'gymlog-v4';
+const CACHE_VERSION = 'gymlog-v5';
 const ASSETS = [
   './',
   './index.html',
@@ -20,15 +24,19 @@ const ASSETS = [
   './icons/icon-512.png',
   './icons/icon-maskable-512.png'
 ];
+const NETWORK_TIMEOUT = 3000;
 
-// Installation : mise en cache de tous les fichiers
+// Installation : on télécharge des copies fraîches (cache: 'reload' ignore
+// le cache HTTP du navigateur, sinon on risquerait de stocker d'anciens fichiers)
 self.addEventListener('install', event => {
   event.waitUntil(
-    caches.open(CACHE_VERSION).then(cache => cache.addAll(ASSETS)).then(() => self.skipWaiting())
+    caches.open(CACHE_VERSION)
+      .then(cache => cache.addAll(ASSETS.map(u => new Request(u, { cache: 'reload' }))))
+      .then(() => self.skipWaiting())
   );
 });
 
-// Activation : suppression des anciens caches
+// Activation : suppression des anciens caches, prise de contrôle immédiate
 self.addEventListener('activate', event => {
   event.waitUntil(
     caches.keys()
@@ -37,28 +45,33 @@ self.addEventListener('activate', event => {
   );
 });
 
-// Requêtes : cache d'abord, réseau ensuite (et on rafraîchit le cache)
 self.addEventListener('fetch', event => {
   const req = event.request;
-  if (req.method !== 'GET' || new URL(req.url).origin !== self.location.origin) return;
+  const url = new URL(req.url);
+  if (req.method !== 'GET' || url.origin !== self.location.origin) return;
+  const key = url.origin + url.pathname; // on ignore les ?paramètres
 
-  event.respondWith(
-    caches.match(req, { ignoreSearch: true }).then(cached => {
-      const network = fetch(req)
-        .then(res => {
-          if (res && res.ok) {
-            const copy = res.clone();
-            caches.open(CACHE_VERSION).then(c => c.put(req, copy));
-          }
-          return res;
-        })
-        .catch(() => cached || caches.match('./index.html'));
-      return cached || network;
-    })
-  );
+  event.respondWith((async () => {
+    const cache = await caches.open(CACHE_VERSION);
+    // 'no-cache' : le navigateur revalide auprès du serveur (réponse 304 légère si rien n'a changé)
+    const network = fetch(new Request(req.url, { cache: 'no-cache', credentials: 'same-origin' }))
+      .then(res => { if (res && res.ok) cache.put(key, res.clone()); return res; });
+    network.catch(() => { /* hors ligne : géré plus bas */ });
+    try {
+      return await Promise.race([
+        network,
+        new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), NETWORK_TIMEOUT))
+      ]);
+    } catch (e) {
+      const cached = await caches.match(key) || await caches.match(req, { ignoreSearch: true });
+      if (cached) return cached;
+      if (req.mode === 'navigate') return (await caches.match('./index.html')) || Response.error();
+      return Response.error();
+    }
+  })());
 });
 
-// Clic sur la notification "repos terminé" : on ramène l'app au premier plan
+// Clic sur la notification « repos terminé » : on ramène l'app au premier plan
 self.addEventListener('notificationclick', event => {
   event.notification.close();
   event.waitUntil(

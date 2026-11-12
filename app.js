@@ -25,6 +25,8 @@ const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
 const cap = s => s.charAt(0).toUpperCase() + s.slice(1);
 const norm = s => String(s).normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
 const DAY = 864e5;
+/** Version affichée dans Réglages (à augmenter à chaque mise en ligne) */
+const APP_VERSION = '1.5';
 
 const MONTHS = ['Janvier', 'Février', 'Mars', 'Avril', 'Mai', 'Juin', 'Juillet', 'Août', 'Septembre', 'Octobre', 'Novembre', 'Décembre'];
 const MONTHS_SHORT = ['janv.', 'févr.', 'mars', 'avr.', 'mai', 'juin', 'juil.', 'août', 'sept.', 'oct.', 'nov.', 'déc.'];
@@ -1970,6 +1972,13 @@ ACTIONS['open-settings'] = () => {
           <button class="set-row-btn" data-action="s-demo"><span>Générer des données de démo</span>${ICON.chevR}</button>
           <button class="set-row-btn danger" data-action="s-reset"><span>Effacer toutes les données</span></button>
         </div>
+        <div class="section-head"><h2>Application</h2></div>
+        <div class="card list-card">
+          <div class="set-row-btn"><span>Version</span><b>${APP_VERSION}</b></div>
+          <button class="set-row-btn" data-action="s-check"><span>Rechercher une mise à jour</span>${ICON.chevR}</button>
+          <button class="set-row-btn" data-action="s-force"><span>Forcer la mise à jour</span>${ICON.chevR}</button>
+        </div>
+        <p class="muted sm pad">« Forcer la mise à jour » recharge l'app depuis Internet. Tes séances et mensurations sont conservées.</p>
         <p class="muted sm pad">Stockage : ${DB.mode === 'indexedDB' ? 'IndexedDB' : 'localStorage (repli)'} · ${S.data.workouts.length} séances · ${S.data.exercises.length} exercices.<br>
         Toutes tes données restent sur cet appareil. Pense à exporter une sauvegarde de temps en temps.</p>
         <p class="muted sm pad">Astuce iPhone : dans Safari, touche Partager puis « Sur l'écran d'accueil » pour installer GymLog en plein écran.</p>`;
@@ -1990,6 +1999,17 @@ ACTIONS['open-settings'] = () => {
         renderPage(pg);
       },
       's-export': exportBackup,
+      's-check': async () => {
+        if (!navigator.onLine) { toast('Pas de connexion Internet'); return; }
+        toast('Recherche de mise à jour…');
+        await checkForUpdate(true);
+        setTimeout(() => toast(`Tu as la dernière version (${APP_VERSION})`), 2500);
+      },
+      's-force': async () => {
+        if (!navigator.onLine) { toast('Connecte-toi à Internet d\'abord'); return; }
+        if (!await confirmSheet('Forcer la mise à jour ?', 'L\'app va se recharger depuis Internet. Tes données sont conservées.', 'Mettre à jour')) return;
+        forceUpdate();
+      },
       's-demo': async () => {
         if (!await confirmSheet('Générer des données de démo ?', 'Environ 10 semaines de séances et de mensurations fictives seront ajoutées à tes données.', 'Générer')) return;
         await generateDemo(); refreshAll(); toast('Données de démo ajoutées');
@@ -2152,6 +2172,53 @@ async function generateDemo() {
   await DB.putMany('measurements', ms);
 }
 
+/* ----- Mises à jour de l'app -----
+   À chaque ouverture (et retour au premier plan), on demande au navigateur
+   de vérifier sw.js sans passer par son cache. Si une nouvelle version
+   s'installe, elle prend la main : on recharge tout de suite si aucune
+   séance n'est en cours, sinon on propose de recharger. */
+let lastUpdateCheck = 0;
+async function checkForUpdate(force = false) {
+  if (!('serviceWorker' in navigator)) return;
+  if (!force && Date.now() - lastUpdateCheck < 60000) return;
+  lastUpdateCheck = Date.now();
+  try { const reg = await navigator.serviceWorker.getRegistration(); reg && await reg.update(); } catch (e) { /* hors ligne */ }
+}
+function setupUpdates() {
+  if (!('serviceWorker' in navigator) || location.protocol === 'file:') return;
+  const hadController = !!navigator.serviceWorker.controller;
+  navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' })
+    .then(() => checkForUpdate(true))
+    .catch(e => console.warn('SW non enregistré', e));
+  let reloading = false;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (!hadController || reloading) return; // 1re installation : rien à recharger
+    if (S.active && !S.active.minimized) { showUpdateBanner(); return; }
+    reloading = true;
+    location.reload();
+  });
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) checkForUpdate(); });
+}
+function showUpdateBanner() {
+  if ($('#update-banner')) return;
+  const b = document.createElement('button');
+  b.id = 'update-banner';
+  b.dataset.action = 'reload-app';
+  b.innerHTML = `<span>Nouvelle version disponible</span><b>Recharger</b>`;
+  document.body.appendChild(b);
+  requestAnimationFrame(() => b.classList.add('show'));
+}
+ACTIONS['reload-app'] = () => location.reload();
+
+/** Dernier recours : vide le cache de l'app et recharge (les données sont conservées) */
+async function forceUpdate() {
+  try {
+    for (const r of await navigator.serviceWorker.getRegistrations()) await r.unregister();
+    for (const k of await caches.keys()) await caches.delete(k);
+  } catch (e) { /* ignore */ }
+  location.reload();
+}
+
 async function init() {
   await DB.init();
   for (const st of ['exercises', 'workouts', 'templates', 'folders', 'measurements']) {
@@ -2188,9 +2255,7 @@ async function init() {
   // Débloque l'audio au premier contact (iOS)
   document.addEventListener('touchend', unlockAudio, { once: true, passive: true });
 
-  if ('serviceWorker' in navigator && location.protocol !== 'file:') {
-    navigator.serviceWorker.register('sw.js').catch(e => console.warn('SW non enregistré', e));
-  }
+  setupUpdates();
   if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => { });
 }
 
