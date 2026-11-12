@@ -6,8 +6,8 @@
    ========================================================================== */
 const DB = (() => {
   const DB_NAME = 'gymlog';
-  const DB_VERSION = 1;
-  const STORES = ['exercises', 'workouts', 'templates', 'folders', 'measurements', 'settings'];
+  const DB_VERSION = 2; // v2 : ajout du store « photos »
+  const STORES = ['exercises', 'workouts', 'templates', 'folders', 'measurements', 'settings', 'photos'];
 
   let idb = null;        // connexion IndexedDB
   let fallback = false;  // true => on utilise localStorage

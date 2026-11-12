@@ -26,7 +26,7 @@ const cap = s => s.charAt(0).toUpperCase() + s.slice(1);
 const norm = s => String(s).normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
 const DAY = 864e5;
 /** Version affichée dans Réglages (à augmenter à chaque mise en ligne) */
-const APP_VERSION = '1.6';
+const APP_VERSION = '1.7';
 
 const MONTHS = ['Janvier', 'Février', 'Mars', 'Avril', 'Mai', 'Juin', 'Juillet', 'Août', 'Septembre', 'Octobre', 'Novembre', 'Décembre'];
 const MONTHS_SHORT = ['janv.', 'févr.', 'mars', 'avr.', 'mai', 'juin', 'juil.', 'août', 'sept.', 'oct.', 'nov.', 'déc.'];
@@ -128,8 +128,10 @@ const S = {
   statsPeriod: '30J',
   histLimit: 40,
   tplSearch: false, tplQuery: '',   // recherche dans l'onglet Séances         // nombre de séances affichées dans l'historique
-  measPeriod: '3M',
-  measSel: ['weight', 'waist']
+  measPeriod: '3 mois',
+  musPeriod: '8S', musMetric: 'sets',          // détail par muscle
+  statsOffset: 0, statsCustom: null, statsMetric: 'volume',
+  exMetric: 'e1rm', exPeriod: 'Tout'            // fiche exercice
 };
 let EX = new Map(); // index id -> exercice
 function rebuildExIndex() { EX = new Map(S.data.exercises.map(e => [e.id, e])); }
@@ -768,11 +770,11 @@ async function renumberTemplates() {
 function openTemplateStats(id) {
   const st = { metric: 'volume' };
   const pg = pushPage({
-    title: () => S.data.templates.find(t => t.id === id)?.name || 'Progression',
+    title: () => groupTemplate(id)?.name || 'Progression',
     render: () => {
-      const t = S.data.templates.find(x => x.id === id);
+      const t = groupTemplate(id);
       if (!t) return emptyState(ICON.trash, 'Séance supprimée.');
-      const ws = S.data.workouts.filter(w => w.templateId === id).sort((a, b) => a.startTime - b.startTime);
+      const ws = groupWorkouts(id).sort((a, b) => a.startTime - b.startTime);
       if (!ws.length) return emptyState(ICON.trend, 'Pas encore réalisée. Démarre-la pour suivre ta progression.', `<button class="btn-primary inline" data-action="start-template" data-id="${id}">${ICON.play} Démarrer</button>`);
       const rows = ws.map(w => ({ w, ...wStats(w) }));
       const avg = k => rows.reduce((a, r) => a + r[k], 0) / rows.length;
@@ -1054,13 +1056,15 @@ function filterExercises(st) {
   return S.data.exercises
     .filter(e => !st.cat || CATEGORIES[st.cat].includes(e.muscleGroup))
     .filter(e => !st.eq || e.equipment === st.eq)
+    .filter(e => !st.lv || (e.level || 'debutant') === st.lv)
     .filter(e => !q || norm(e.name).includes(q) || norm(MUSCLES[e.muscleGroup] || '').includes(q))
     .sort((a, b) => a.name.localeCompare(b.name, 'fr'));
 }
 
-function filterChips(st, catAction, eqAction) {
+function filterChips(st, catAction, eqAction, lvAction) {
   return `<div class="chips scroll-x">${Object.keys(CATEGORIES).map(c => `<button class="chip ${st.cat === c ? 'on' : ''}" data-action="${catAction}" data-v="${c}">${c}</button>`).join('')}</div>
-    <div class="chips scroll-x">${Object.entries(EQUIPMENT).map(([k, v]) => `<button class="chip ${st.eq === k ? 'on' : ''}" data-action="${eqAction}" data-v="${k}">${v}</button>`).join('')}</div>`;
+    <div class="chips scroll-x">${Object.entries(EQUIPMENT).map(([k, v]) => `<button class="chip ${st.eq === k ? 'on' : ''}" data-action="${eqAction}" data-v="${k}">${v}</button>`).join('')}</div>
+    <div class="chips scroll-x">${Object.entries(LEVELS).map(([k, v]) => `<button class="chip lvl ${st.lv === k ? 'on' : ''}" data-action="${lvAction}" data-v="${k}">${v}</button>`).join('')}</div>`;
 }
 
 function exerciseRows(list, { action, sel = [] }) {
@@ -1077,18 +1081,19 @@ function exerciseRows(list, { action, sel = [] }) {
 
 /** Page "Bibliothèque d'exercices" */
 ACTIONS['open-library'] = () => {
-  const st = { q: '', cat: '', eq: '' };
+  const st = { q: '', cat: '', eq: '', lv: '' };
   const pg = pushPage({
     title: 'Exercices',
     right: `<button class="icon-btn" data-action="lib-new" aria-label="Créer un exercice">${ICON.plus}</button>`,
     render: () => `
       <div class="search-wrap">${ICON.search}<input class="search" type="search" placeholder="Rechercher un exercice" data-input="lib-q" value="${esc(st.q)}"></div>
-      <div id="lib-chips">${filterChips(st, 'lib-cat', 'lib-eq')}</div>
+      <div id="lib-chips">${filterChips(st, 'lib-cat', 'lib-eq', 'lib-lv')}</div>
       <div id="lib-list" class="ex-list">${exerciseRows(filterExercises(st), { action: 'open-exercise' })}</div>`,
     inputs: { 'lib-q': el => { st.q = el.value; $('#lib-list', pg.el).innerHTML = exerciseRows(filterExercises(st), { action: 'open-exercise' }); } },
     actions: {
       'lib-cat': el => { st.cat = st.cat === el.dataset.v ? '' : el.dataset.v; renderPage(pg); },
       'lib-eq': el => { st.eq = st.eq === el.dataset.v ? '' : el.dataset.v; renderPage(pg); },
+      'lib-lv': el => { st.lv = st.lv === el.dataset.v ? '' : el.dataset.v; renderPage(pg); },
       'lib-new': () => openExerciseForm(() => renderPage(pg))
     }
   });
@@ -1096,10 +1101,10 @@ ACTIONS['open-library'] = () => {
 
 /** Sélecteur d'exercices (plein écran, multi-sélection) */
 function openPicker(onPick) {
-  const st = { q: '', cat: '', eq: '', sel: [] };
+  const st = { q: '', cat: '', eq: '', lv: '', sel: [] };
   const list = () => exerciseRows(filterExercises(st), { action: 'pk-item', sel: st.sel });
   const upd = () => {
-    $('#pk-chips', sh.el).innerHTML = filterChips(st, 'pk-cat', 'pk-eq');
+    $('#pk-chips', sh.el).innerHTML = filterChips(st, 'pk-cat', 'pk-eq', 'pk-lv');
     $('#pk-list', sh.el).innerHTML = list();
     const b = $('#pk-done', sh.el);
     b.disabled = !st.sel.length;
@@ -1109,13 +1114,14 @@ function openPicker(onPick) {
     full: true,
     html: `<div class="sheet-top"><button class="link-btn" data-action="sheet-close">Annuler</button><h3>Exercices</h3><button class="link-btn strong" id="pk-done" data-action="pk-done" disabled>Ajouter</button></div>
       <div class="search-wrap">${ICON.search}<input class="search" type="search" placeholder="Rechercher" data-input="pk-q"></div>
-      <div id="pk-chips">${filterChips(st, 'pk-cat', 'pk-eq')}</div>
+      <div id="pk-chips">${filterChips(st, 'pk-cat', 'pk-eq', 'pk-lv')}</div>
       <button class="ex-row tap create" data-action="pk-create"><span class="ex-thumb c0">${ICON.plus}</span><span class="ex-row-txt"><b>Créer un exercice</b></span></button>
       <div id="pk-list" class="ex-list">${list()}</div>`,
     inputs: { 'pk-q': el => { st.q = el.value; $('#pk-list', sh.el).innerHTML = list(); } },
     actions: {
       'pk-cat': el => { st.cat = st.cat === el.dataset.v ? '' : el.dataset.v; upd(); },
       'pk-eq': el => { st.eq = st.eq === el.dataset.v ? '' : el.dataset.v; upd(); },
+      'pk-lv': el => { st.lv = st.lv === el.dataset.v ? '' : el.dataset.v; upd(); },
       'pk-item': el => {
         const id = el.dataset.id, i = st.sel.indexOf(id);
         if (i >= 0) st.sel.splice(i, 1); else st.sel.push(id);
@@ -1156,7 +1162,14 @@ function openExerciseForm(onSaved) {
   });
 }
 
-/** Contenu de la fiche exercice (historique, 1RM, graphique) */
+/** Contenu de la fiche exercice : stats, courbe (mesure + période + records), consignes, historique */
+const EX_METRICS = {
+  e1rm: { label: '1RM estimé', of: h => h.e1rm, fmt: v => fmtW(v, 1) + ' ' + unit(), conv: toU },
+  top: { label: 'Top set', of: h => h.maxW, fmt: v => fmtW(v) + ' ' + unit(), conv: toU },
+  volume: { label: 'Volume', of: h => h.volume, fmt: v => fmtVol(v), conv: toU },
+  reps: { label: 'Reps', of: h => h.sets.filter(isWork).reduce((a, s) => a + (s.reps || 0), 0), fmt: v => fmtNum(v) + ' reps', conv: v => v }
+};
+const EX_PERIODS = { '6S': 42, '3M': 92, '6M': 183, '1A': 365, 'Tout': 1e5 };
 function exerciseDetailHtml(id) {
   const e = EX.get(id);
   if (!e) return emptyState(ICON.trash, 'Exercice introuvable.');
@@ -1164,9 +1177,15 @@ function exerciseDetailHtml(id) {
   const best = hist.reduce((b, h) => h.e1rm > (b?.e1rm || 0) ? h : b, null);
   const maxW = Math.max(0, ...hist.map(h => h.maxW));
   const totalSets = hist.reduce((a, h) => a + h.sets.length, 0);
+  const M = EX_METRICS[S.exMetric] || EX_METRICS.e1rm;
+  const fromT = Date.now() - EX_PERIODS[S.exPeriod] * DAY;
+  const hp = hist.filter(h => h.w.startTime >= fromT);
+  const pts = hp.map(h => ({ x: h.w.startTime, y: M.conv(M.of(h)), rec: h.sets.some(s => s.isRecord) }));
+  const nRec = pts.filter(p => p.rec).length;
   return `
     <div class="ex-detail-head">${exThumb(e)}<div><h1>${esc(e.name)}</h1>
-      <p class="muted">${MUSCLES[e.muscleGroup]}${e.secondaryMuscle ? ' · ' + MUSCLES[e.secondaryMuscle] : ''} · ${EQUIPMENT[e.equipment]}</p></div></div>
+      <p class="muted">${MUSCLES[e.muscleGroup]}${e.secondaryMuscle ? ' · ' + MUSCLES[e.secondaryMuscle] : ''} · ${EQUIPMENT[e.equipment]}</p>
+      ${e.level ? `<span class="lvl-badge lv-${e.level}">${LEVELS[e.level]}</span>` : ''}</div></div>
     ${e.note ? `<div class="card note-card">${ICON.note}<p>${esc(e.note)}</p></div>` : ''}
     <div class="stat-grid">
       <div class="card stat"><span>1RM estimé</span><b>${best ? fmtW(best.e1rm, 1) : '—'}<small> ${unit()}</small></b></div>
@@ -1174,15 +1193,26 @@ function exerciseDetailHtml(id) {
       <div class="card stat"><span>Séances</span><b>${hist.length}</b></div>
       <div class="card stat"><span>Séries</span><b>${totalSets}</b></div>
     </div>
-    ${hist.length >= 2 ? `<div class="card"><h3 class="card-title">Évolution du 1RM estimé</h3>${lineChart([{ color: 'var(--accent)', points: hist.map(h => ({ x: h.w.startTime, y: toU(h.e1rm) })) }], { yFmt: v => fmtNum(v), area: true })}</div>` : ''}
+    ${hist.length ? `<div class="card">
+      <div class="tabs-line">${Object.entries(EX_METRICS).map(([k, m]) => `<button class="${S.exMetric === k ? 'on' : ''}" data-action="exd-metric" data-v="${k}">${m.label}</button>`).join('')}</div>
+      <div class="chips scroll-x tight">${Object.keys(EX_PERIODS).map(k => `<button class="chip ${S.exPeriod === k ? 'on' : ''}" data-action="exd-period" data-v="${k}">${k}</button>`).join('')}</div>
+      ${pts.length >= 2 ? lineChart([{ color: 'var(--accent)', points: pts, area: true }], { yFmt: v => fmtNum(v, v < 100 ? 1 : 0) })
+        : '<p class="empty-sm">Pas assez de séances sur cette période.</p>'}
+      ${nRec ? `<p class="muted sm"><i class="rec-dot"></i>${nRec} séance${nRec > 1 ? 's' : ''} avec un record</p>` : ''}
+    </div>` : ''}
     ${best ? `<div class="card rec-card">${ICON.trophy}<div><b>Meilleure série : ${fmtW(best.best.weight)} ${unit()} × ${best.best.reps}</b><span class="muted sm">${fmtDateLong(best.w.startTime)} · 1RM ${fmtW(best.e1rm, 1)} ${unit()}</span></div></div>` : ''}
+    ${e.instructions ? `<div class="card how-card"><h3 class="card-title">Comment faire</h3><p>${esc(e.instructions)}</p></div>` : ''}
     <div class="section-head"><h2>Historique</h2></div>
     ${hist.length ? [...hist].reverse().slice(0, 30).map(h => `<div class="card hist-item">
         <div class="hist-top"><b>${esc(h.w.name)}</b><span class="muted sm">${fmtDateLong(h.w.startTime)}</span></div>
-        <div class="hist-chips">${h.sets.map(s => `<span class="set-chip ${s.isRecord ? 'rec' : ''}">${fmtW(s.weight)}×${s.reps}</span>`).join('')}</div>
+        <div class="hist-chips">${h.sets.map(s => `<span class="set-chip ${s.isRecord ? 'rec' : ''} ${isWork(s) ? '' : 'wu'}">${isWork(s) ? '' : 'É '}${fmtW(s.weight)}×${s.reps}</span>`).join('')}</div>
       </div>`).join('') : '<p class="empty-sm">Pas encore réalisé. Ton historique apparaîtra ici.</p>'}
     ${e.isCustom ? `<button class="btn-plain danger" data-action="ex-del" data-id="${e.id}">Supprimer cet exercice</button>` : ''}`;
 }
+/** Re-rend la fiche (page ou feuille) après un changement de mesure / période */
+function rerenderCtx(el) { const ctx = findCtx(el); if (ctx && ctx.render) renderPage(ctx); else if (ctx && ctx.refresh) ctx.refresh(); }
+ACTIONS['exd-metric'] = el => { S.exMetric = el.dataset.v; rerenderCtx(el); };
+ACTIONS['exd-period'] = el => { S.exPeriod = el.dataset.v; rerenderCtx(el); };
 
 /** Ouvre la fiche : en feuille si l'entraînement est affiché, sinon en page */
 ACTIONS['open-exercise'] = el => openExerciseDetail(el.dataset.id);
@@ -1195,6 +1225,7 @@ function openExerciseDetail(id) {
   };
   if (S.active && !S.active.minimized) {
     const sh = openSheet({ full: true, html: `<div class="sheet-top"><span></span><h3>Exercice</h3><button class="link-btn strong" data-action="sheet-close">OK</button></div>${exerciseDetailHtml(id)}`, actions: { 'ex-del': async () => { if (await del()) { sh.close(); renderWorkout(); } } } });
+    sh.refresh = () => sh.set(`<div class="sheet-top"><span></span><h3>Exercice</h3><button class="link-btn strong" data-action="sheet-close">OK</button></div>${exerciseDetailHtml(id)}`);
     return;
   }
   pushPage({ title: 'Exercice', render: () => exerciseDetailHtml(id), actions: { 'ex-del': async () => { if (await del()) { popPage(); refreshAll(); } } } });
@@ -2119,127 +2150,301 @@ function weekStreak() {
 /** Niveau d'intensité 0..5 selon le nombre de séries */
 const muscleLevel = n => n <= 0 ? 0 : n < 4 ? 1 : n < 7 ? 2 : n < 11 ? 3 : n < 16 ? 4 : 5;
 
+/** Tonnage par muscle (principal = 100 %, secondaire = 50 %) */
+function muscleTonnage(workouts) {
+  const m = {};
+  for (const w of workouts) for (const ex of w.exercises) {
+    const e = EX.get(ex.exerciseId); if (!e || !ex.sets) continue;
+    const v = ex.sets.filter(s => s.completed && isWork(s)).reduce((a, s) => a + (s.weight || 0) * (s.reps || 0), 0);
+    if (!v) continue;
+    m[e.muscleGroup] = (m[e.muscleGroup] || 0) + v;
+    if (e.secondaryMuscle) m[e.secondaryMuscle] = (m[e.secondaryMuscle] || 0) + v * 0.5;
+  }
+  return m;
+}
+/** Débuts de semaine (lundi), de la plus ancienne à la semaine en cours */
+function weekStarts(n) {
+  const cur = startOfWeek(Date.now());
+  return Array.from({ length: n }, (_, i) => addDays(cur, -7 * (n - 1 - i)).getTime());
+}
+const workoutsBetween = (from, end) => S.data.workouts.filter(w => w.startTime >= from && w.startTime < end);
+/** "aujourd'hui", "hier", "28 sept." */
+function relShort(ts) {
+  const diff = Math.round((startOfDay(Date.now()) - startOfDay(ts)) / DAY);
+  return diff <= 0 ? 'aujourd\'hui' : diff === 1 ? 'hier' : fmtDateShort(ts);
+}
+
+/* ----- Regroupement des séances (par séance type, sinon par nom) ----- */
+function groupKeyOf(w) { return w.templateId && S.data.templates.some(t => t.id === w.templateId) ? w.templateId : 'name:' + w.name; }
+function workoutGroups() {
+  const m = new Map();
+  for (const w of workoutsDesc()) { const k = groupKeyOf(w); if (!m.has(k)) m.set(k, []); m.get(k).push(w); }
+  return [...m.entries()];
+}
+function groupWorkouts(key) { return S.data.workouts.filter(w => groupKeyOf(w) === key); }
+function groupTemplate(key) {
+  if (!String(key).startsWith('name:')) return S.data.templates.find(t => t.id === key) || null;
+  const ws = groupWorkouts(key).sort((a, b) => b.startTime - a.startTime);
+  return ws.length ? { id: key, name: key.slice(5), exercises: ws[0].exercises.map(e => ({ exerciseId: e.exerciseId })) } : null;
+}
+function sessionRow([key, ws]) {
+  const vols = ws.map(w => wStats(w).volume);
+  const prev = vols.slice(1, 4);
+  const avg = prev.length ? prev.reduce((a, b) => a + b, 0) / prev.length : null;
+  const trend = avg == null || !avg ? '' : vols[0] > avg * 1.02 ? 'up' : vols[0] < avg * 0.98 ? 'down' : 'flat';
+  return `<button class="sess2 tap" data-action="open-group" data-key="${esc(key)}">
+    <span class="sess2-top"><i class="dot"></i><b>${esc(ws[0].name)}</b><small>${ws.length}×</small>${trend ? `<em class="tr ${trend}">${{ up: '↗', down: '↘', flat: '→' }[trend]}</em>` : ''}<span class="chev-r">${ICON.chevR}</span></span>
+    <span class="sess2-chips">${ws.slice(0, 2).map(w => `<span class="chip-out">${relShort(w.startTime)} · <b>${fmtW(wStats(w).volume, 0)} ${unit()}</b></span>`).join('')}</span>
+  </button>`;
+}
+ACTIONS['open-group'] = el => openTemplateStats(el.dataset.key);
+ACTIONS['open-sessions'] = () => pushPage({
+  title: 'Mes séances',
+  render: () => { const g = workoutGroups(); return g.length ? `<div class="card list-card">${g.map(sessionRow).join('')}</div>` : emptyState(ICON.chart, 'Aucune séance réalisée.'); }
+});
+
+/* ----- Accueil Progrès ----- */
 function viewProgress() {
   const now = Date.now();
   const streak = weekStreak();
-  const wk = startOfWeek(now);
   const goal = S.settings.weeklyGoal || 3;
-  const thisWeek = S.data.workouts.filter(w => w.startTime >= wk.getTime()).length;
-  // 8 dernières semaines
-  const weeks = [];
-  for (let i = 7; i >= 0; i--) {
-    const s = addDays(wk, -7 * i).getTime(), e = s + 7 * DAY;
-    weeks.push({ s, n: S.data.workouts.filter(w => w.startTime >= s && w.startTime < e).length });
-  }
-  // Muscles sur 7 jours
-  const ms = muscleSets(S.data.workouts.filter(w => w.startTime >= now - 7 * DAY));
+  const weeks = weekStarts(8).map(s => workoutsBetween(s, s + 7 * DAY).length);
+  const thisWeek = weeks[7];
+  const from = startOfDay(now - 6 * DAY);
+  const ms = muscleSets(workoutsBetween(from.getTime(), now + 1));
   const levels = Object.fromEntries(Object.keys(MUSCLES).map(m => [m, muscleLevel(ms[m] || 0)]));
-  const top = Object.entries(ms).sort((a, b) => b[1] - a[1]).slice(0, 4);
-
-  // Mes séances : regroupement par nom
-  const groups = {};
-  for (const w of workoutsDesc()) (groups[w.name] ||= []).push(w);
-  const groupList = Object.entries(groups).sort((a, b) => b[1].length - a[1].length).slice(0, 8);
-
+  const groups = workoutGroups();
   return `
-    <header class="big-head"><h1>Progrès</h1>
-      ${avatarBtn()}</header>
-
-    <div class="card streak-card">
-      <div class="streak-top">
-        <div class="streak-ic">${ICON.flame}</div>
-        <div><b class="streak-n">${streak} semaine${streak > 1 ? 's' : ''}</b><span class="muted sm">d'affilée</span></div>
-        <div class="streak-goal"><b>${thisWeek}/${goal}</b><span class="muted sm">cette semaine</span></div>
-      </div>
-      <div class="progress"><i style="width:${clamp(thisWeek / goal * 100, 0, 100)}%"></i></div>
-      <div class="weeks">${weeks.map((w, i) => `<div class="wk ${w.n ? 'on' : ''} ${i === 7 ? 'cur' : ''}"><i style="height:${clamp(w.n / goal * 100, w.n ? 25 : 8, 100)}%"></i><span>${new Date(w.s).getDate()}</span></div>`).join('')}</div>
+    <header class="big-head"><h1>Progrès</h1>${avatarBtn()}</header>
+    <div class="card streak2">
+      <span class="streak-pill">${ICON.flame}${streak}</span>
+      <div class="streak-txt"><b>${streak} semaine${streak > 1 ? 's' : ''} d'affilée</b><span>${thisWeek} séance${thisWeek > 1 ? 's' : ''} cette semaine · objectif ${goal}</span></div>
+      <div class="streak-bars">${weeks.map((n, i) => `<i class="${n ? 'on' : ''} ${i === 7 ? 'cur' : ''}" style="height:${n ? clamp(n / goal * 100, 40, 100) : 28}%"></i>`).join('')}</div>
     </div>
-
     <div class="card">
-      <div class="card-head"><h3 class="card-title">Muscles travaillés</h3><span class="muted sm">7 derniers jours</span></div>
-      <div class="body-maps">
-        <figure>${bodySvg('front', levels)}<figcaption>Face</figcaption></figure>
-        <figure>${bodySvg('back', levels)}<figcaption>Dos</figcaption></figure>
-      </div>
-      <div class="legend"><span>Moins</span>${[1, 2, 3, 4, 5].map(l => `<i class="lv l${l}"></i>`).join('')}<span>Plus</span></div>
-      ${top.length ? `<div class="top-muscles">${top.map(([m, n]) => `<span class="chip on-soft">${MUSCLES[m]} · ${fmtNum(n, 1)} séries</span>`).join('')}</div>` : '<p class="empty-sm">Aucune séance ces 7 derniers jours.</p>'}
+      <div class="card-head"><h3 class="card-title">Muscles travaillés</h3><span class="mono-sm">7 J</span></div>
+      <div class="body-maps"><figure>${bodySvg('front', levels)}<figcaption>FACE</figcaption></figure><figure>${bodySvg('back', levels)}<figcaption>DOS</figcaption></figure></div>
+      <div class="sum-legend"><span>Moins de séries</span><i></i><span>Plus de séries</span></div>
+      <div class="mus-foot"><span><small>Séries effectives</small><small>${fmtDateShort(from)} – ${fmtDateShort(now)}</small></span>
+        <button class="link-btn strong" data-action="open-muscles">Voir le détail ↗</button></div>
     </div>
-
+    <div class="section-head"><h2 class="cond">Mes séances</h2>${groups.length > 3 ? '<button class="link-btn strong" data-action="open-sessions">Tout voir ›</button>' : ''}</div>
+    ${groups.length ? `<div class="card list-card">${groups.slice(0, 3).map(sessionRow).join('')}</div>` : '<p class="empty-sm">Tes séances réalisées apparaîtront ici.</p>'}
     <div class="menu-grid">
-      <button class="card menu-tile tap" data-action="open-stats"><span class="mt-ic">${ICON.chart}</span><b>Statistiques</b><span class="muted sm">Volume, heatmap</span></button>
-      <button class="card menu-tile tap" data-action="open-measures"><span class="mt-ic">${ICON.ruler}</span><b>Mensurations</b><span class="muted sm">${S.data.measurements.length} relevé${S.data.measurements.length > 1 ? 's' : ''}</span></button>
+      <button class="card menu-tile tap" data-action="open-stats"><span class="mt-ic">${ICON.chart}</span><b>Statistiques</b><span class="muted sm">Volume, calendrier</span></button>
+      <button class="card menu-tile tap" data-action="open-measures"><span class="mt-ic">${ICON.ruler}</span><b>Mesures</b><span class="muted sm">Mensurations, photos</span></button>
       <button class="card menu-tile tap" data-action="open-records"><span class="mt-ic">${ICON.trophy}</span><b>Records</b><span class="muted sm">1RM estimés</span></button>
       <button class="card menu-tile tap" data-action="open-library"><span class="mt-ic">${ICON.book}</span><b>Exercices</b><span class="muted sm">${S.data.exercises.length} exercices</span></button>
-    </div>
-
-    <div class="section-head"><h2>Mes séances</h2></div>
-    ${groupList.length ? `<div class="card list-card">${groupList.map(([name, ws]) => {
-      const vols = ws.slice(0, 6).reverse().map(w => wStats(w).volume);
-      const max = Math.max(...vols, 1);
-      return `<div class="sess-row"><div class="sess-txt"><b>${esc(name)}</b><span class="muted sm">${ws.length} fois · ${relDay(ws[0].startTime)}</span></div>
-        <div class="sparkbars">${vols.map(v => `<i style="height:${Math.max(8, v / max * 100)}%"></i>`).join('')}</div>
-        <span class="sess-vol">${fmtVol(vols[vols.length - 1])}</span></div>`;
-    }).join('')}</div>` : '<p class="empty-sm">Tes séances réalisées apparaîtront ici.</p>'}`;
+    </div>`;
 }
+
+/* ----- Détail par muscle (« rattrapez vos points faibles ») ----- */
+const MUS_PERIODS = { '4S': 4, '8S': 8, '12S': 12, '6M': 26, '1A': 52 };
+ACTIONS['open-muscles'] = () => {
+  const pg = pushPage({
+    title: 'Muscles',
+    render: () => {
+      const n = MUS_PERIODS[S.musPeriod];
+      const weeks = weekStarts(n);
+      const from = weeks[0], end = Date.now() + 1;
+      const fn = S.musMetric === 'tonnage' ? muscleTonnage : muscleSets;
+      const perWeek = weeks.map(s => fn(workoutsBetween(s, s + 7 * DAY)));
+      const total = fn(workoutsBetween(from, end));
+      const setsAvg = muscleSets(workoutsBetween(from, end));
+      // semaine en cours partielle : on la compte au prorata pour la moyenne
+      const effWeeks = n - 1 + Math.min(1, (Date.now() - weeks[n - 1]) / (7 * DAY));
+      const levels = Object.fromEntries(Object.keys(MUSCLES).map(m => [m, muscleLevel((setsAvg[m] || 0) / effWeeks)]));
+      const fmtV = v => S.musMetric === 'tonnage' ? fmtVol(v) : fmtNum(v, 1);
+      const rows = Object.keys(MUSCLES).map(m => {
+        const vals = perWeek.map(w => w[m] || 0);
+        const half = Math.floor(n / 2);
+        const a = vals.slice(0, half).reduce((x, y) => x + y, 0), b = vals.slice(half).reduce((x, y) => x + y, 0);
+        const tr = !a && !b ? '' : b > a * 1.1 ? 'up' : b < a * 0.9 ? 'down' : 'flat';
+        return { m, total: total[m] || 0, avg: (total[m] || 0) / effWeeks, vals, tr };
+      }).sort((x, y) => y.total - x.total);
+      const max = Math.max(1, ...rows.flatMap(r => r.vals));
+      const weak = Object.keys(MUSCLES).map(m => ({ m, avg: (setsAvg[m] || 0) / effWeeks })).sort((x, y) => x.avg - y.avg).slice(0, 3);
+      const suggest = m => S.data.exercises.filter(e => e.muscleGroup === m).sort((x, y) => (x.level === 'debutant' ? 0 : 1) - (y.level === 'debutant' ? 0 : 1)).slice(0, 2);
+      return `
+        <p class="page-sub">${fmtDateShort(from)} – ${fmtDateShort(Date.now())}</p>
+        <div class="seg">${Object.keys(MUS_PERIODS).map(p => `<button class="${S.musPeriod === p ? 'on' : ''}" data-action="mu-period" data-v="${p}">${p}</button>`).join('')}</div>
+        <div class="card">
+          <div class="body-maps"><figure>${bodySvg('front', levels)}<figcaption>FACE</figcaption></figure><figure>${bodySvg('back', levels)}<figcaption>DOS</figcaption></figure></div>
+          <div class="sum-legend"><span>Moins de séries</span><i></i><span>Plus de séries</span></div>
+          <p class="muted sm center">Couleur = séries effectives par semaine en moyenne. Repère courant : 10 à 20 séries par muscle et par semaine.</p>
+        </div>
+        <div class="card weak-card">
+          <h3 class="card-title">Points faibles</h3>
+          ${weak.map(w => `<div class="weak-row"><div><b>${MUSCLES[w.m]}</b><span class="muted sm">${fmtNum(w.avg, 1)} série${w.avg >= 2 ? 's' : ''} / semaine</span></div>
+            <div class="weak-ex">${suggest(w.m).map(e => `<button class="chip-out tap" data-action="open-exercise" data-id="${e.id}">${esc(e.name)}</button>`).join('')}</div></div>`).join('')}
+        </div>
+        <div class="section-head"><h2 class="cond">Par muscle</h2>
+          <div class="seg sm mini">${[['sets', 'Séries'], ['tonnage', 'Tonnage']].map(([k, l]) => `<button class="${S.musMetric === k ? 'on' : ''}" data-action="mu-metric" data-v="${k}">${l}</button>`).join('')}</div></div>
+        <div class="card list-card">${rows.map(r => `<div class="mus-row">
+          <div class="mus-name"><b>${MUSCLES[r.m]}</b><span class="muted sm">${fmtV(r.total)} au total · ${fmtV(r.avg)} / sem.</span></div>
+          <div class="sparkbars wide">${r.vals.map(v => `<i style="height:${v ? Math.max(8, v / max * 100) : 4}%" class="${v ? '' : 'zero'}"></i>`).join('')}</div>
+          ${r.tr ? `<em class="tr ${r.tr}">${{ up: '↗', down: '↘', flat: '→' }[r.tr]}</em>` : '<em class="tr"></em>'}
+        </div>`).join('')}</div>
+        <p class="muted sm pad">Séries effectives : séries validées hors échauffement. Le muscle secondaire d'un exercice compte pour moitié.</p>`;
+    },
+    actions: {
+      'mu-period': el => { S.musPeriod = el.dataset.v; renderPage(pg); },
+      'mu-metric': el => { S.musMetric = el.dataset.v; renderPage(pg); }
+    }
+  });
+};
 
 /* ----- Statistiques ----- */
 const PERIODS = { '30J': 30, '3M': 91, '6M': 182, '1A': 365 };
+/** Période affichée (avec décalage ‹ › et période sur mesure) */
+function statsRange() {
+  if (S.statsCustom) {
+    const f = parseDayKey(S.statsCustom.from).getTime(), e = addDays(parseDayKey(S.statsCustom.to), 1).getTime();
+    const len = e - f;
+    return { from: f - S.statsOffset * len, end: e - S.statsOffset * len, len };
+  }
+  const len = PERIODS[S.statsPeriod] * DAY;
+  const end0 = addDays(startOfDay(Date.now()), 1).getTime();
+  return { from: end0 - len - S.statsOffset * len, end: end0 - S.statsOffset * len, len };
+}
+const STAT_METRICS = {
+  volume: { label: 'Volume', of: w => wStats(w).volume, fmt: v => fmtVol(v), axis: v => { v = toU(v); return v >= 1000 ? fmtNum(v / 1000, 0) + 'k' : fmtNum(v); }, conv: toU },
+  reps: { label: 'Reps', of: w => w.exercises.reduce((a, ex) => a + (ex.sets || []).filter(s => s.completed && isWork(s)).reduce((b, s) => b + (s.reps || 0), 0), 0), fmt: v => fmtNum(v) + ' reps', axis: v => fmtNum(v), conv: v => v },
+  duree: { label: 'Durée', of: w => (w.duration || 0), fmt: v => fmtDur(v), axis: v => fmtNum(v / 3600, 1) + 'h', conv: v => v }
+};
 ACTIONS['open-stats'] = () => {
   const pg = pushPage({
     title: 'Statistiques',
     render: () => {
-      const days = PERIODS[S.statsPeriod];
-      const end = addDays(startOfDay(Date.now()), 1).getTime();
-      const from = end - days * DAY;
-      const prevFrom = from - days * DAY;
-      const ws = S.data.workouts.filter(w => w.startTime >= from && w.startTime < end);
-      const pws = S.data.workouts.filter(w => w.startTime >= prevFrom && w.startTime < from);
-      const sum = list => list.reduce((acc, w) => { const s = wStats(w); acc.vol += s.volume; acc.sets += s.sets; acc.pr += s.pr; acc.dur += w.duration || 0; return acc; }, { vol: 0, sets: 0, pr: 0, dur: 0 });
-      const cur = sum(ws), prv = sum(pws);
-      const delta = (a, b) => {
-        if (!b) return a ? '<span class="delta up">nouveau</span>' : '';
-        const p = (a - b) / b * 100;
-        return `<span class="delta ${p >= 0 ? 'up' : 'down'}">${p >= 0 ? '▲' : '▼'} ${fmtNum(Math.abs(p))} %</span>`;
+      const { from, end, len } = statsRange();
+      const prevFrom = from - len;
+      const ws = workoutsBetween(from, end), pws = workoutsBetween(prevFrom, from);
+      const M = STAT_METRICS[S.statsMetric];
+      const tot = list => list.reduce((a, w) => a + M.of(w), 0);
+      const cur = tot(ws), prv = tot(pws);
+      const pct = prv ? (cur - prv) / prv * 100 : null;
+      const sum = list => list.reduce((acc, w) => { const s = wStats(w); acc.sets += s.sets; acc.pr += s.pr; acc.dur += w.duration || 0; acc.vol += s.volume; return acc; }, { sets: 0, pr: 0, dur: 0, vol: 0 });
+      const c = sum(ws), p = sum(pws);
+      const volPct = p.vol ? (c.vol - p.vol) / p.vol * 100 : null;
+      // Faits marquants
+      const chips = [];
+      if (ws.length) {
+        const big = ws.reduce((b, w) => wStats(w).volume > wStats(b).volume ? w : b, ws[0]);
+        chips.push(`💪 Record : plus gros entraînement (${fmtVol(wStats(big).volume)})`);
+      }
+      if (volPct != null) chips.push(`${volPct >= 0 ? '↑' : '↓'} ${volPct >= 0 ? '+' : ''}${fmtNum(volPct)} % de volume vs période précédente`);
+      if (c.pr) chips.push(`🏆 ${c.pr} record${c.pr > 1 ? 's' : ''} battu${c.pr > 1 ? 's' : ''}`);
+      if (ws.length) {
+        const long = ws.reduce((b, w) => (w.duration || 0) > (b.duration || 0) ? w : b, ws[0]);
+        chips.push(`⏱ Plus longue séance : ${fmtDur(long.duration)}`);
+        const days = [0, 0, 0, 0, 0, 0, 0]; ws.forEach(w => days[new Date(w.startTime).getDay()]++);
+        const fav = days.indexOf(Math.max(...days));
+        chips.push(`📅 Jour préféré : ${DAYS_LONG[fav]}`);
+      }
+      // Courbes cumulées : période actuelle + précédente (alignée jour par jour)
+      const cumul = (list, start) => {
+        const byDay = {}; list.forEach(w => { const k = dayKey(w.startTime); byDay[k] = (byDay[k] || 0) + M.of(w); });
+        let acc = 0; const pts = [];
+        for (let d = new Date(start), i = 0; d.getTime() < start + len - 1000; d = addDays(d, 1), i++) {
+          acc += byDay[dayKey(d)] || 0;
+          pts.push({ x: from + i * DAY, y: M.conv(acc) });
+        }
+        return pts;
       };
-      // Volume cumulé jour par jour
-      const byDay = {};
-      ws.forEach(w => { const k = dayKey(w.startTime); byDay[k] = (byDay[k] || 0) + wStats(w).volume; });
-      let acc = 0;
-      const pts = [];
-      for (let t = from; t < end; t += DAY) { acc += toU(byDay[dayKey(t)] || 0); pts.push({ x: t, y: acc }); }
-      // Répartition par groupe
+      const curPts = cumul(ws, from), prevPts = cumul(pws, prevFrom);
+      const today = Date.now();
+      const curShown = curPts.filter(pt => pt.x <= today);
+      // Muscles sur la période
       const ms = muscleSets(ws);
-      const cats = {};
-      Object.entries(ms).forEach(([m, n]) => { const c = MUSCLE_CATEGORY[m]; if (c) cats[c] = (cats[c] || 0) + n; });
+      const effWeeks = Math.max(1, len / (7 * DAY));
+      const levels = Object.fromEntries(Object.keys(MUSCLES).map(m => [m, muscleLevel((ms[m] || 0) / effWeeks)]));
+      const cats = {}; Object.entries(ms).forEach(([m, n]) => { const k = MUSCLE_CATEGORY[m]; if (k) cats[k] = (cats[k] || 0) + n; });
       const catList = Object.entries(cats).sort((a, b) => b[1] - a[1]);
-      const catTotal = catList.reduce((a, c) => a + c[1], 0) || 1;
-
+      const catTotal = catList.reduce((a, x) => a + x[1], 0) || 1;
+      const y1 = new Date(from).getFullYear() !== new Date(end - DAY).getFullYear() || new Date(from).getFullYear() !== new Date().getFullYear();
+      const label = d => fmtDateShort(d) + (y1 ? ' ' + new Date(d).getFullYear() : '');
       return `
-        <div class="seg">${Object.keys(PERIODS).map(p => `<button class="${S.statsPeriod === p ? 'on' : ''}" data-action="period" data-v="${p}">${p}</button>`).join('')}</div>
+        <p class="page-sub">${label(from)} – ${label(end - DAY)}</p>
+        <div class="per-nav">
+          <button class="circle-btn sm" data-action="st-prev" aria-label="Période précédente">${ICON.chevL}</button>
+          <div class="seg">${Object.keys(PERIODS).map(k => `<button class="${!S.statsCustom && S.statsPeriod === k ? 'on' : ''}" data-action="period" data-v="${k}">${k}</button>`).join('')}</div>
+          <button class="circle-btn sm ${S.statsCustom ? 'on' : ''}" data-action="st-cal" aria-label="Période sur mesure">${ICON.cal}</button>
+          <button class="circle-btn sm" data-action="st-next" aria-label="Période suivante" ${S.statsOffset === 0 ? 'disabled' : ''}>${ICON.chevR}</button>
+        </div>
+        ${chips.length ? `<div class="chips scroll-x hl-chips">${chips.map(t => `<span class="hl-chip">${esc(t)}</span>`).join('')}</div>` : ''}
+        <div class="card">${monthCalendars(from, end)}
+          <div class="cal-legend"><span><i class="c1"></i>1 entraînement</span><span><i class="c2"></i>2 entraînements</span><span><i class="c3"></i>3+ entraînements</span></div></div>
         <div class="card">
-          <div class="card-head"><h3 class="card-title">Activité</h3><span class="muted sm">${ws.length} séance${ws.length > 1 ? 's' : ''}</span></div>
-          ${heatmap(from, end, byDay)}
+          <h3 class="card-title">Résumé d'activité</h3>
+          <div class="sum-big"><div><b>${M.fmt(cur)}</b>${pct == null ? '' : `<span class="delta ${pct >= 0 ? 'up' : 'down'}">${pct >= 0 ? '↑ +' : '↓ '}${fmtNum(pct)} %</span>`}</div>
+            <span class="prev-lbl"><i></i>Précédent : ${M.fmt(prv)}</span></div>
+          <div class="tabs-line">${Object.entries(STAT_METRICS).map(([k, m]) => `<button class="${S.statsMetric === k ? 'on' : ''}" data-action="st-metric" data-v="${k}">${m.label}</button>`).join('')}</div>
+          ${cur || prv ? lineChart([
+            { color: 'var(--text-2)', points: prevPts, width: 1.6, opacity: .55, noEnd: true },
+            { color: 'var(--accent)', points: curShown.length > 1 ? curShown : curPts, area: true }
+          ], { yFmt: M.axis, yMin0: true }) : '<p class="empty-sm">Aucune donnée sur ces deux périodes.</p>'}
+        </div>
+        <div class="card">
+          <div class="card-head"><h3 class="card-title">Muscles travaillés</h3><span class="mono-sm">${Math.round(len / DAY)} J</span></div>
+          <div class="body-maps"><figure>${bodySvg('front', levels)}<figcaption>FACE</figcaption></figure><figure>${bodySvg('back', levels)}<figcaption>DOS</figcaption></figure></div>
+          <div class="sum-legend"><span>Moins de séries</span><i></i><span>Plus de séries</span></div>
+          ${catList.map(([k, n]) => `<div class="hbar"><span>${k}</span><div class="hbar-track"><i style="width:${n / catList[0][1] * 100}%"></i></div><b>${fmtNum(n / catTotal * 100)} %</b></div>`).join('')}
         </div>
         <div class="stat-grid">
-          <div class="card stat"><span>Volume total</span><b>${fmtVol(cur.vol)}</b>${delta(cur.vol, prv.vol)}</div>
-          <div class="card stat"><span>Séances</span><b>${ws.length}</b>${delta(ws.length, pws.length)}</div>
-          <div class="card stat"><span>Séries</span><b>${cur.sets}</b>${delta(cur.sets, prv.sets)}</div>
-          <div class="card stat"><span>Temps total</span><b>${fmtDur(cur.dur)}</b>${delta(cur.dur, prv.dur)}</div>
-          <div class="card stat"><span>Records</span><b>${cur.pr}</b>${delta(cur.pr, prv.pr)}</div>
-          <div class="card stat"><span>Durée moy.</span><b>${ws.length ? fmtDur(cur.dur / ws.length) : '—'}</b></div>
-        </div>
-        <div class="card">
-          <div class="card-head"><h3 class="card-title">Volume cumulé</h3><span class="muted sm">vs période préc. : ${fmtVol(prv.vol)}</span></div>
-          ${cur.vol ? lineChart([{ color: 'var(--accent)', points: pts }], { yFmt: v => v >= 1000 ? fmtNum(v / 1000, 1) + 't' : fmtNum(v), area: true }) : '<p class="empty-sm">Pas de volume sur la période.</p>'}
-        </div>
-        <div class="card">
-          <h3 class="card-title">Répartition des muscles</h3>
-          ${catList.length ? catList.map(([c, n]) => `<div class="hbar"><span>${c}</span><div class="hbar-track"><i style="width:${n / catList[0][1] * 100}%"></i></div><b>${fmtNum(n / catTotal * 100)} %</b></div>`).join('') : '<p class="empty-sm">Aucune donnée.</p>'}
+          <div class="card stat"><span>Séances</span><b>${ws.length}</b>${p.sets || pws.length ? `<span class="muted sm">préc. ${pws.length}</span>` : ''}</div>
+          <div class="card stat"><span>Séries</span><b>${c.sets}</b><span class="muted sm">préc. ${p.sets}</span></div>
+          <div class="card stat"><span>Temps total</span><b>${fmtDur(c.dur)}</b><span class="muted sm">préc. ${fmtDur(p.dur)}</span></div>
+          <div class="card stat"><span>Durée moyenne</span><b>${ws.length ? fmtDur(c.dur / ws.length) : '—'}</b></div>
         </div>`;
     },
-    actions: { period: el => { S.statsPeriod = el.dataset.v; renderPage(pg); } }
+    actions: {
+      period: el => { S.statsPeriod = el.dataset.v; S.statsCustom = null; S.statsOffset = 0; renderPage(pg); },
+      'st-prev': () => { S.statsOffset++; renderPage(pg); },
+      'st-next': () => { if (S.statsOffset > 0) { S.statsOffset--; renderPage(pg); } },
+      'st-metric': el => { S.statsMetric = el.dataset.v; renderPage(pg); },
+      'st-cal': () => {
+        const r = statsRange();
+        const d = { from: dayKey(r.from), to: dayKey(r.end - DAY) };
+        const sh = openSheet({
+          html: `<div class="dialog left"><h3>Période sur mesure</h3>
+            <div class="row2"><div><label class="lbl">Du</label><input class="field" type="date" data-input="sc-from" value="${d.from}" max="${dayKey(Date.now())}"></div>
+            <div><label class="lbl">Au</label><input class="field" type="date" data-input="sc-to" value="${d.to}" max="${dayKey(Date.now())}"></div></div>
+            <button class="btn-primary" data-action="sc-ok">Afficher</button>
+            ${S.statsCustom ? '<button class="btn-plain" data-action="sc-reset">Revenir aux périodes standard</button>' : '<button class="btn-plain" data-action="sheet-close">Annuler</button>'}</div>`,
+          inputs: { 'sc-from': el => { d.from = el.value; }, 'sc-to': el => { d.to = el.value; } },
+          actions: {
+            'sc-ok': () => {
+              if (!d.from || !d.to || d.from > d.to) { toast('Choisis une date de début avant la date de fin'); return; }
+              S.statsCustom = { ...d }; S.statsOffset = 0; sh.close(); renderPage(pg);
+            },
+            'sc-reset': () => { S.statsCustom = null; S.statsOffset = 0; sh.close(); renderPage(pg); }
+          }
+        });
+      }
+    }
   });
 };
+
+/** Calendriers mensuels de la période (pastilles selon le nombre d'entraînements) */
+function monthCalendars(from, end) {
+  const count = {};
+  workoutsBetween(from, end).forEach(w => { const k = dayKey(w.startTime); count[k] = (count[k] || 0) + 1; });
+  const months = [];
+  for (let m = new Date(new Date(from).getFullYear(), new Date(from).getMonth(), 1); m.getTime() < end; m = new Date(m.getFullYear(), m.getMonth() + 1, 1)) months.push(m);
+  const fromK = dayKey(from), endK = dayKey(end - DAY);
+  return `<div class="months ${months.length > 2 ? 'many' : ''}">${months.map(m => {
+    const y = m.getFullYear(), mo = m.getMonth();
+    const off = (m.getDay() + 6) % 7, n = new Date(y, mo + 1, 0).getDate();
+    let cells = '<i class="mc mc-e"></i>'.repeat(off);
+    for (let d = 1; d <= n; d++) {
+      const k = dayKey(new Date(y, mo, d));
+      const c = count[k] || 0;
+      cells += `<i class="mc c${Math.min(3, c)} ${k < fromK || k > endK ? 'out' : ''}" title="${d} ${MONTHS_SHORT[mo]} : ${c} entraînement${c > 1 ? 's' : ''}"></i>`;
+    }
+    return `<div class="month"><span class="month-t">${MONTHS_SHORT[mo]} ${y}</span>
+      <div class="mgrid">${['L', 'M', 'M', 'J', 'V', 'S', 'D'].map(x => `<span>${x}</span>`).join('')}${cells}</div></div>`;
+  }).join('')}</div>`;
+}
 
 /* ----- Records ----- */
 ACTIONS['open-records'] = () => pushPage({
@@ -2258,83 +2463,256 @@ ACTIONS['open-records'] = () => pushPage({
   }
 });
 
-/* ----- Mensurations ----- */
-const MEAS = [
-  { k: 'weight', label: 'Poids', unit: 'kg', color: '#34C759' },
-  { k: 'bodyFat', label: 'Masse grasse', unit: '%', color: '#FF9500' },
-  { k: 'height', label: 'Taille', unit: 'cm', color: '#8E8E93' },
-  { k: 'arms', label: 'Tour de bras', unit: 'cm', color: '#007AFF' },
-  { k: 'chest', label: 'Tour de poitrine', unit: 'cm', color: '#AF52DE' },
-  { k: 'thighs', label: 'Tour de cuisse', unit: 'cm', color: '#FF2D55' },
-  { k: 'waist', label: 'Tour de taille', unit: 'cm', color: '#5AC8FA' },
-  { k: 'hips', label: 'Tour de hanches', unit: 'cm', color: '#FFCC00' }
-];
-const MEAS_PERIODS = { '1M': 31, '3M': 92, '6M': 183, 'Tout': 99999 };
-const measSorted = () => [...S.data.measurements].sort((a, b) => a.date.localeCompare(b.date));
+/* ----- Mesures (mensurations + photos) ----- */
+ICON.cal = svg('<rect x="3.5" y="5" width="17" height="15.5" rx="2.5"/><path d="M3.5 10h17M8 3v4M16 3v4"/>');
+ICON.camera = svg('<path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/>');
 
-ACTIONS['open-measures'] = () => {
+/** Mesures prédéfinies (les 4 dernières sont masquées par défaut) */
+const MEAS_DEFAULT = [
+  { k: 'weight', label: 'Poids', unit: 'kg', color: '#1FA855' },
+  { k: 'bodyFat', label: 'Masse grasse', unit: '%', color: '#3E6FD8' },
+  { k: 'waist', label: 'Tour de taille', unit: 'cm', color: '#B58A1E' },
+  { k: 'arms', label: 'Tour de bras', unit: 'cm', color: '#9461D9' },
+  { k: 'chest', label: 'Tour de poitrine', unit: 'cm', color: '#E0445A' },
+  { k: 'thighs', label: 'Tour de cuisse', unit: 'cm', color: '#E07B1F' },
+  { k: 'hips', label: 'Tour de hanches', unit: 'cm', color: '#1797A6' },
+  { k: 'height', label: 'Taille', unit: 'cm', color: '#7C7C84' },
+  { k: 'neck', label: 'Tour de cou', unit: 'cm', color: '#5B8C2A' },
+  { k: 'shoulders', label: 'Tour d\'épaules', unit: 'cm', color: '#C2479B' },
+  { k: 'calves', label: 'Tour de mollet', unit: 'cm', color: '#3A9E8F' },
+  { k: 'forearms', label: 'Tour d\'avant-bras', unit: 'cm', color: '#8A6A4F' }
+];
+const MEAS_HIDDEN_DEFAULT = ['neck', 'shoulders', 'calves', 'forearms'];
+const MEAS_PIN_DEFAULT = ['weight', 'bodyFat', 'waist', 'arms'];
+const CUSTOM_COLORS = ['#D9534F', '#2E86AB', '#8E44AD', '#16A085', '#D35400', '#2C3E50'];
+/** Styles de courbe : trait + marqueur, pour distinguer les mesures sans compter sur la couleur */
+const LINE_STYLES = [
+  { dash: '', marker: 'circle' }, { dash: '7 4', marker: 'square' }, { dash: '2 4', marker: 'triangle' },
+  { dash: '9 3 2 3', marker: 'diamond' }, { dash: '', marker: 'square' }, { dash: '5 5', marker: 'circle' }
+];
+const MEAS_PERIODS = { '1 mois': 31, '3 mois': 92, '6 mois': 183, 'Tout': 99999 };
+
+const allMeas = () => [...MEAS_DEFAULT, ...(S.settings.customMeas || [])];
+const visibleMeas = () => { const h = S.settings.measHidden ?? MEAS_HIDDEN_DEFAULT; return allMeas().filter(d => !h.includes(d.k)); };
+const pinnedMeas = () => (S.settings.measPinned ?? MEAS_PIN_DEFAULT).map(k => allMeas().find(d => d.k === k)).filter(Boolean);
+const measSorted = () => [...S.data.measurements].sort((a, b) => a.date.localeCompare(b.date));
+const fmtDateY = k => { const d = parseDayKey(k); return `${d.getDate()} ${MONTHS_SHORT[d.getMonth()]} ${d.getFullYear()}`; };
+
+function markerSvg(x, y, type, color, r = 3.2) {
+  const st = `fill="${color}" stroke="var(--card)" stroke-width="1"`;
+  if (type === 'square') return `<rect x="${x - r}" y="${y - r}" width="${2 * r}" height="${2 * r}" ${st}/>`;
+  if (type === 'triangle') return `<path d="M${x} ${y - r * 1.2}L${x + r * 1.1} ${y + r * .9}L${x - r * 1.1} ${y + r * .9}Z" ${st}/>`;
+  if (type === 'diamond') return `<path d="M${x} ${y - r * 1.25}L${x + r * 1.1} ${y}L${x} ${y + r * 1.25}L${x - r * 1.1} ${y}Z" ${st}/>`;
+  return `<circle cx="${x}" cy="${y}" r="${r}" ${st}/>`;
+}
+function lineIcon(color, style) {
+  return `<svg viewBox="0 0 30 10" class="lg-ic"><line x1="1" y1="5" x2="29" y2="5" stroke="${color}" stroke-width="2" ${style.dash ? `stroke-dasharray="${style.dash}"` : ''}/>${markerSvg(15, 5, style.marker, color, 3)}</svg>`;
+}
+/** Écart en unité (« pt » pour un pourcentage) et en % */
+function measDelta(def, a, b) {
+  const d = b - a, p = a ? d / a * 100 : 0;
+  const sign = v => (v > 0 ? '+' : '') + fmtNum(v, 1);
+  return `${sign(d)} ${def.unit === '%' ? 'pt' : def.unit} · ${sign(p)} %`;
+}
+
+let photosCache = null;
+async function loadPhotos() { if (!photosCache) { try { photosCache = await DB.getAll('photos'); } catch (e) { photosCache = []; } } return photosCache; }
+const photosSorted = () => [...(photosCache || [])].sort((a, b) => a.date.localeCompare(b.date) || a.createdAt - b.createdAt);
+
+ACTIONS['open-measures'] = async () => {
+  await loadPhotos();
   const pg = pushPage({
-    title: 'Mensurations',
+    title: 'Mesures',
     right: `<button class="icon-btn" data-action="m-add" aria-label="Ajouter un relevé">${ICON.plus}</button>`,
     render: () => {
       const all = measSorted();
       const fromKey = dayKey(Date.now() - MEAS_PERIODS[S.measPeriod] * DAY);
       const inP = all.filter(m => m.date >= fromKey);
-      // Courbes de variation relative (%) par rapport au premier relevé de la période
-      const series = S.measSel.map(k => {
-        const def = MEAS.find(x => x.k === k);
-        const pts = inP.filter(m => m[k] != null);
+      const pins = pinnedMeas();
+      const series = pins.map((def, i) => {
+        const pts = inP.filter(m => m[def.k] != null);
         if (!pts.length) return null;
-        const base = pts[0][k];
-        return { color: def.color, points: pts.map(m => ({ x: parseDayKey(m.date).getTime(), y: base ? (m[k] - base) / base * 100 : 0 })) };
+        const base = pts[0][def.k], st = LINE_STYLES[i % LINE_STYLES.length];
+        return { color: def.color, dash: st.dash, marker: st.marker, width: 2, noEnd: true, points: pts.map(m => ({ x: parseDayKey(m.date).getTime(), y: base ? (m[def.k] - base) / base * 100 : 0 })) };
       }).filter(Boolean);
-      const cards = MEAS.map(def => {
-        const vals = all.filter(m => m[def.k] != null);
-        const last = vals[vals.length - 1], prev = vals[vals.length - 2];
-        const d = last && prev ? last[def.k] - prev[def.k] : null;
-        return `<button class="card meas-card ${S.measSel.includes(def.k) ? 'on' : ''}" data-action="m-toggle" data-k="${def.k}" style="--mc:${def.color}">
-          <span class="meas-lbl"><i></i>${def.label}</span>
-          <b>${last ? fmtNum(last[def.k], 1) : '—'}<small> ${def.unit}</small></b>
-          <span class="meas-d ${d == null ? '' : d > 0 ? 'up' : d < 0 ? 'down' : ''}">${d == null ? (last ? fmtDateShort(parseDayKey(last.date)) : 'Aucun relevé') : `${d > 0 ? '+' : ''}${fmtNum(d, 1)} ${def.unit}`}</span>
-        </button>`;
+      const legend = pins.map((def, i) => {
+        const pts = inP.filter(m => m[def.k] != null), allPts = all.filter(m => m[def.k] != null);
+        const last = allPts[allPts.length - 1];
+        return `<div class="lg-item">
+          <span class="lg-name">${lineIcon(def.color, LINE_STYLES[i % LINE_STYLES.length])}${esc(def.label)}</span>
+          <b>${last ? fmtNum(last[def.k], 1) : '—'}<small> ${esc(def.unit)}</small></b>
+          <span class="muted sm">${pts.length > 1 ? measDelta(def, pts[0][def.k], pts[pts.length - 1][def.k]) : 'Pas assez de relevés'}</span>
+          <span class="muted sm">${last ? fmtDateY(last.date) : '—'}</span>
+        </div>`;
       }).join('');
+      const vis = visibleMeas();
+      const photos = photosSorted();
       return `
+        <p class="page-sub">Ton suivi corporel</p>
         <button class="btn-primary" data-action="m-add">${ICON.plus} Ajouter un relevé</button>
         <div class="card">
-          <div class="card-head"><h3 class="card-title">Évolution (%)</h3></div>
+          <div class="card-head"><div><h3 class="card-title" style="margin:0">Évolution</h3><span class="muted sm">${pins.length} mesure${pins.length > 1 ? 's' : ''} épinglée${pins.length > 1 ? 's' : ''}</span></div>
+            <button class="link-btn u" data-action="m-pins">Modifier</button></div>
           <div class="seg sm">${Object.keys(MEAS_PERIODS).map(p => `<button class="${S.measPeriod === p ? 'on' : ''}" data-action="m-period" data-v="${p}">${p}</button>`).join('')}</div>
-          ${series.length && series.some(s => s.points.length > 1) ? lineChart(series, { yFmt: v => `${v > 0 ? '+' : ''}${fmtNum(v, 1)}%`, zero: true }) : '<p class="empty-sm">Au moins deux relevés sont nécessaires sur la période pour tracer une courbe.</p>'}
-          <p class="muted sm">Touche une mesure ci-dessous pour l'afficher sur le graphique.</p>
+          <p class="muted sm">Variation relative (%)</p>
+          ${series.some(s => s.points.length > 1) ? lineChart(series, { yFmt: v => `${fmtNum(v, 1)} %`, zero: true }) : '<p class="empty-sm">Au moins deux relevés sont nécessaires sur la période pour tracer une courbe.</p>'}
+          <p class="muted sm">0 % = premier relevé de chaque mesure dans la période</p>
+          <div class="lg-grid">${legend}</div>
+          <button class="link-btn muted-link" data-action="m-explain">Comprendre la comparaison</button>
         </div>
-        <div class="meas-grid">${cards}</div>
-        <div class="section-head"><h2>Historique</h2></div>
-        ${all.length ? `<div class="card list-card">${[...all].reverse().map(m => `<button class="meas-row tap" data-action="m-edit" data-id="${m.id}">
-          <b>${fmtDateLong(parseDayKey(m.date))} ${parseDayKey(m.date).getFullYear()}</b>
-          <span class="muted sm">${MEAS.filter(d => m[d.k] != null).map(d => `${d.label} ${fmtNum(m[d.k], 1)}${d.unit}`).join(' · ')}</span></button>`).join('')}</div>` : '<p class="empty-sm">Aucun relevé pour l\'instant.</p>'}`;
+        <button class="row-link tap" data-action="m-all"><span>Toutes les mesures</span><span class="muted sm">${all.length} relevé${all.length > 1 ? 's' : ''}</span>${ICON.chevR}</button>
+        <div class="section-head"><h2 class="cond">Mes mensurations</h2><button class="link-btn u" data-action="m-custom">Personnaliser</button></div>
+        <div class="card list-card">${vis.map(def => {
+          const vals = all.filter(m => m[def.k] != null), last = vals[vals.length - 1], prev = vals[vals.length - 2];
+          return `<button class="meas-row2 tap" data-action="m-detail" data-k="${def.k}"><i style="background:${def.color}"></i>
+            <span class="mr-txt"><b>${esc(def.label)}</b><span class="muted sm">${last ? fmtDateY(last.date) : 'Aucun relevé'}</span></span>
+            <span class="mr-val"><b>${last ? fmtNum(last[def.k], 1) : '—'}<small> ${esc(def.unit)}</small></b>${last && prev ? `<span class="muted sm">${measDelta(def, prev[def.k], last[def.k]).split(' · ')[0]}</span>` : ''}</span>${ICON.chevR}</button>`;
+        }).join('')}</div>
+        <div class="section-head"><h2 class="cond">Photos avant / après</h2>${photos.length ? `<button class="link-btn strong" data-action="ph-all">Tout voir ›</button>` : ''}</div>
+        <div class="card">
+          ${photos.length ? `<div class="ph-strip">${photos.slice(-6).reverse().map(ph => `<button class="ph-thumb" data-action="ph-view" data-id="${ph.id}"><img src="${ph.data}" alt="" loading="lazy"><span>${fmtDateShort(parseDayKey(ph.date))}</span></button>`).join('')}</div>` : '<p class="empty-sm">Ajoute une photo pour suivre ta transformation. Elles restent uniquement sur ce téléphone.</p>'}
+          <div class="row-actions" style="margin-top:12px">
+            <label class="btn-soft" for="ph-file">${ICON.camera}<span>Ajouter</span></label>
+            <button class="btn-soft" data-action="ph-compare" ${photos.length < 2 ? 'disabled' : ''}>${ICON.chart}<span>Comparer</span></button>
+          </div>
+          <input type="file" id="ph-file" accept="image/*" data-change="ph-file" hidden>
+        </div>`;
     },
+    changes: { 'ph-file': async el => { await addPhotoFromFile(el.files[0]); el.value = ''; renderPage(pg); } },
     actions: {
       'm-add': () => openMeasureForm(null, () => renderPage(pg)),
-      'm-edit': el => openMeasureForm(el.dataset.id, () => renderPage(pg)),
       'm-period': el => { S.measPeriod = el.dataset.v; renderPage(pg); },
-      'm-toggle': el => {
-        const k = el.dataset.k, i = S.measSel.indexOf(k);
-        if (i >= 0) S.measSel.splice(i, 1); else S.measSel.push(k);
-        renderPage(pg);
-      }
+      'm-pins': () => openPinsSheet(() => renderPage(pg)),
+      'm-custom': () => openCustomMeasSheet(() => renderPage(pg)),
+      'm-detail': el => openMeasureDetail(el.dataset.k, () => renderPage(pg)),
+      'm-all': () => openAllMeasures(() => renderPage(pg)),
+      'm-explain': () => openSheet({ html: `<div class="dialog left"><h3>Comprendre la comparaison</h3>
+        <p>Le graphique compare des mesures d'unités différentes (kg, %, cm). Pour les mettre sur la même échelle, chaque courbe part de <b>0 %</b> : c'est le premier relevé de cette mesure dans la période choisie.</p>
+        <p>Ensuite, chaque point indique l'écart <b>en pourcentage</b> par rapport à ce premier relevé. Exemple : un tour de taille qui passe de 84 à 81 cm affiche −3,6 %.</p>
+        <p>Sous le graphique, l'écart est donné en unité (kg, cm, ou « pt » pour la masse grasse) puis en %.</p>
+        <button class="btn-primary" data-action="sheet-close">Compris</button></div>` }),
+      'ph-all': () => openPhotosPage(() => renderPage(pg)),
+      'ph-view': el => openPhotoViewer(el.dataset.id, () => renderPage(pg)),
+      'ph-compare': () => openPhotoCompare()
     }
   });
 };
 
+/** Choix des mesures épinglées sur le graphique */
+function openPinsSheet(onDone) {
+  const sel = [...(S.settings.measPinned ?? MEAS_PIN_DEFAULT)];
+  const body = () => `<div class="dialog left"><h3>Mesures épinglées</h3><p class="muted sm">Jusqu'à 6 mesures sur le graphique.</p>
+    <div class="opt-list">${visibleMeas().map(d => `<button class="opt check-opt ${sel.includes(d.k) ? 'on' : ''}" data-action="pin-t" data-k="${d.k}"><i style="background:${d.color}"></i><span>${esc(d.label)}</span>${sel.includes(d.k) ? ICON.check : ''}</button>`).join('')}</div>
+    <button class="btn-primary" data-action="pin-ok">Enregistrer</button></div>`;
+  const sh = openSheet({
+    html: body(),
+    actions: {
+      'pin-t': el => { const k = el.dataset.k, i = sel.indexOf(k); if (i >= 0) sel.splice(i, 1); else if (sel.length < 6) sel.push(k); else toast('6 mesures maximum'); sh.set(body()); },
+      'pin-ok': async () => { S.settings.measPinned = sel; await saveSettings(); sh.close(); onDone(); }
+    }
+  });
+}
+
+/** Personnaliser : afficher / masquer les mesures, créer les siennes */
+function openCustomMeasSheet(onDone) {
+  const hidden = [...(S.settings.measHidden ?? MEAS_HIDDEN_DEFAULT)];
+  const custom = [...(S.settings.customMeas || [])];
+  const body = () => `<div class="dialog left"><h3>Mes mensurations</h3>
+    <p class="muted sm">Coche les mesures à suivre. Tu peux aussi créer les tiennes (bras droit / gauche, mollet…).</p>
+    <div class="opt-list">${[...MEAS_DEFAULT, ...custom].map(d => `<div class="opt check-opt ${hidden.includes(d.k) ? '' : 'on'}">
+      <button class="co-main" data-action="cm-t" data-k="${d.k}"><i style="background:${d.color}"></i><span>${esc(d.label)} <small class="muted">${esc(d.unit)}</small></span>${hidden.includes(d.k) ? '' : ICON.check}</button>
+      ${d.k.startsWith('c_') ? `<button class="co-del" data-action="cm-del" data-k="${d.k}" aria-label="Supprimer">${ICON.trash}</button>` : ''}</div>`).join('')}</div>
+    <button class="btn-soft wide" data-action="cm-new">${ICON.plus}<span>Nouvelle mesure</span></button>
+    <button class="btn-primary" data-action="cm-ok">Enregistrer</button></div>`;
+  const sh = openSheet({
+    html: body(),
+    actions: {
+      'cm-t': el => { const k = el.dataset.k, i = hidden.indexOf(k); if (i >= 0) hidden.splice(i, 1); else hidden.push(k); sh.set(body()); },
+      'cm-del': async el => {
+        const k = el.dataset.k;
+        const used = S.data.measurements.some(m => m[k] != null);
+        if (used && !await confirmSheet('Supprimer cette mesure ?', 'Ses valeurs seront retirées de tous tes relevés.', 'Supprimer', true)) return;
+        custom.splice(custom.findIndex(c => c.k === k), 1);
+        if (used) { const changed = S.data.measurements.filter(m => m[k] != null); changed.forEach(m => { delete m[k]; }); await DB.putMany('measurements', changed); }
+        sh.set(body());
+      },
+      'cm-new': async () => {
+        const label = await inputSheet('Nom de la mesure', '', 'Ex. : Bras droit', 'Continuer');
+        if (!label) return;
+        const sh2 = openSheet({
+          html: `<div class="dialog"><h3>Unité de « ${esc(label)} »</h3><div class="grid-opts two">${['cm', 'kg', '%', 'mm'].map(u => `<button class="opt-pill" data-action="u" data-v="${u}">${u}</button>`).join('')}</div></div>`,
+          actions: { u: el => { custom.push({ k: 'c_' + uid(), label, unit: el.dataset.v, color: CUSTOM_COLORS[custom.length % CUSTOM_COLORS.length] }); sh2.close(); sh.set(body()); } }
+        });
+      },
+      'cm-ok': async () => {
+        S.settings.customMeas = custom; S.settings.measHidden = hidden;
+        S.settings.measPinned = (S.settings.measPinned ?? MEAS_PIN_DEFAULT).filter(k => allMeas().some(d => d.k === k) && !hidden.includes(k));
+        await saveSettings(); sh.close(); onDone();
+      }
+    }
+  });
+}
+
+/** Détail d'une mesure : valeurs absolues + historique */
+function openMeasureDetail(k, onChange) {
+  const pg = pushPage({
+    title: () => allMeas().find(d => d.k === k)?.label || 'Mesure',
+    render: () => {
+      const def = allMeas().find(d => d.k === k);
+      if (!def) return emptyState(ICON.ruler, 'Mesure supprimée.');
+      const vals = measSorted().filter(m => m[k] != null);
+      if (!vals.length) return emptyState(ICON.ruler, 'Aucun relevé pour cette mesure.', '<button class="btn-primary inline" data-action="m-add">Ajouter un relevé</button>');
+      const nums = vals.map(m => m[k]);
+      const first = vals[0], last = vals[vals.length - 1];
+      return `
+        <div class="stat-grid">
+          <div class="card stat"><span>Actuel</span><b>${fmtNum(last[k], 1)}<small> ${esc(def.unit)}</small></b><span class="muted sm">${fmtDateY(last.date)}</span></div>
+          <div class="card stat"><span>Depuis le début</span><b style="font-size:17px">${vals.length > 1 ? measDelta(def, first[k], last[k]).replace(' · ', '<br>') : '—'}</b></div>
+          <div class="card stat"><span>Minimum</span><b>${fmtNum(Math.min(...nums), 1)}<small> ${esc(def.unit)}</small></b></div>
+          <div class="card stat"><span>Maximum</span><b>${fmtNum(Math.max(...nums), 1)}<small> ${esc(def.unit)}</small></b></div>
+        </div>
+        ${vals.length > 1 ? `<div class="card">${lineChart([{ color: def.color, marker: 'circle', area: true, points: vals.map(m => ({ x: parseDayKey(m.date).getTime(), y: m[k] })) }], { yFmt: v => fmtNum(v, 1) })}</div>` : ''}
+        <div class="section-head"><h2 class="cond">Historique</h2></div>
+        <div class="card list-card">${[...vals].reverse().map((m, i, arr) => `<button class="meas-row2 tap" data-action="m-edit" data-id="${m.id}">
+          <span class="mr-txt"><b>${fmtDateY(m.date)}</b></span>
+          <span class="mr-val"><b>${fmtNum(m[k], 1)}<small> ${esc(def.unit)}</small></b>${arr[i + 1] ? `<span class="muted sm">${measDelta(def, arr[i + 1][k], m[k]).split(' · ')[0]}</span>` : ''}</span>${ICON.chevR}</button>`).join('')}</div>`;
+    },
+    actions: {
+      'm-add': () => openMeasureForm(null, () => { renderPage(pg); onChange(); }),
+      'm-edit': el => openMeasureForm(el.dataset.id, () => { renderPage(pg); onChange(); })
+    }
+  });
+}
+
+/** Tous les relevés */
+function openAllMeasures(onChange) {
+  const pg = pushPage({
+    title: 'Toutes les mesures',
+    render: () => {
+      const all = measSorted();
+      if (!all.length) return emptyState(ICON.ruler, 'Aucun relevé pour l\'instant.');
+      return `<div class="card list-card">${[...all].reverse().map(m => `<button class="meas-row tap" data-action="m-edit" data-id="${m.id}">
+        <b>${cap(fmtDateLong(parseDayKey(m.date)))} ${parseDayKey(m.date).getFullYear()}</b>
+        <span class="muted sm">${allMeas().filter(d => m[d.k] != null).map(d => `${esc(d.label)} ${fmtNum(m[d.k], 1)} ${esc(d.unit)}`).join(' · ')}</span></button>`).join('')}</div>`;
+    },
+    actions: { 'm-edit': el => openMeasureForm(el.dataset.id, () => { renderPage(pg); onChange(); }) }
+  });
+}
+
+/** Formulaire d'un relevé (mesures visibles + mesures déjà renseignées) */
 function openMeasureForm(id, onDone) {
   const src = id ? S.data.measurements.find(m => m.id === id) : null;
-  const last = measSorted().pop() || {};
+  const last = {};
+  measSorted().forEach(m => allMeas().forEach(d => { if (m[d.k] != null) last[d.k] = m[d.k]; }));
   const d = src ? { ...src } : { id: uid(), date: dayKey(Date.now()) };
+  const defs = allMeas().filter(x => visibleMeas().includes(x) || (src && src[x.k] != null));
   const sh = openSheet({
     full: true,
     html: `<div class="sheet-top"><button class="link-btn" data-action="sheet-close">Annuler</button><h3>${src ? 'Modifier le relevé' : 'Nouveau relevé'}</h3><button class="link-btn strong" data-action="m-save">OK</button></div>
       <label class="lbl">Date</label><input class="field" type="date" data-input="m-date" value="${d.date}" max="${dayKey(Date.now())}">
-      <div class="card list-card form-list">${MEAS.map(def => `<label class="form-row"><span>${def.label}</span>
-        <input inputmode="decimal" data-input="m-val" data-k="${def.k}" value="${d[def.k] ?? ''}" placeholder="${last[def.k] != null ? fmtNum(last[def.k], 1) : '—'}"><em>${def.unit}</em></label>`).join('')}</div>
+      <div class="card list-card form-list">${defs.map(def => `<label class="form-row"><span>${esc(def.label)}</span>
+        <input inputmode="decimal" data-input="m-val" data-k="${def.k}" value="${d[def.k] != null ? String(d[def.k]).replace('.', ',') : ''}" placeholder="${last[def.k] != null ? fmtNum(last[def.k], 1) : '—'}"><em>${esc(def.unit)}</em></label>`).join('')}</div>
+      <p class="muted sm pad">Les champs vides ne sont pas enregistrés. Ajoute d'autres mesures avec « Personnaliser ».</p>
       <button class="btn-primary" data-action="m-save">Enregistrer</button>
       ${src ? '<button class="btn-plain danger" data-action="m-del">Supprimer ce relevé</button>' : ''}`,
     inputs: {
@@ -2344,8 +2722,8 @@ function openMeasureForm(id, onDone) {
     actions: {
       'm-save': async () => {
         if (!d.date) { toast('Choisis une date'); return; }
-        if (!MEAS.some(def => d[def.k] != null)) { toast('Saisis au moins une valeur'); return; }
-        MEAS.forEach(def => { if (d[def.k] == null) delete d[def.k]; });
+        if (!allMeas().some(def => d[def.k] != null)) { toast('Saisis au moins une valeur'); return; }
+        allMeas().forEach(def => { if (d[def.k] == null) delete d[def.k]; });
         await save('measurements', d);
         sh.close(); onDone(); toast('Relevé enregistré');
       },
@@ -2353,6 +2731,98 @@ function openMeasureForm(id, onDone) {
         if (!await confirmSheet('Supprimer ce relevé ?', '', 'Supprimer', true)) return;
         await removeItem('measurements', d.id); sh.close(); onDone();
       }
+    }
+  });
+}
+
+/* ----- Photos avant / après (stockées uniquement sur le téléphone) ----- */
+/** Redimensionne la photo (1280 px max) et la compresse en JPEG */
+function fileToDataURL(file, max = 1280) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      const r = Math.min(1, max / Math.max(img.width, img.height));
+      const c = document.createElement('canvas');
+      c.width = Math.round(img.width * r); c.height = Math.round(img.height * r);
+      c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+      URL.revokeObjectURL(url);
+      resolve(c.toDataURL('image/jpeg', 0.82));
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('image')); };
+    img.src = url;
+  });
+}
+async function addPhotoFromFile(file) {
+  if (!file) return;
+  try {
+    toast('Ajout de la photo…');
+    const data = await fileToDataURL(file);
+    const ph = { id: uid(), date: dayKey(Date.now()), data, createdAt: Date.now() };
+    await DB.put('photos', ph);
+    (await loadPhotos()).push(ph);
+    toast('Photo ajoutée');
+  } catch (e) { toast('Impossible de lire cette photo'); }
+}
+function openPhotosPage(onChange) {
+  const pg = pushPage({
+    title: 'Photos',
+    right: `<label class="icon-btn" for="ph-file2" aria-label="Ajouter une photo">${ICON.plus}</label>`,
+    render: () => {
+      const list = photosSorted().reverse();
+      const byDate = {};
+      list.forEach(p => (byDate[p.date] ||= []).push(p));
+      return `<input type="file" id="ph-file2" accept="image/*" data-change="ph-file" hidden>
+        ${list.length >= 2 ? `<button class="btn-primary" data-action="ph-compare">${ICON.chart} Comparer avant / après</button>` : ''}
+        ${Object.entries(byDate).map(([k, ps]) => `<div class="day-head"><h3>${fmtDateY(k).toUpperCase()}</h3><span class="mono-sm">${ps.length} photo${ps.length > 1 ? 's' : ''}</span></div>
+          <div class="ph-grid">${ps.map(p => `<button class="ph-thumb" data-action="ph-view" data-id="${p.id}"><img src="${p.data}" alt="" loading="lazy"></button>`).join('')}</div>`).join('') || emptyState(ICON.camera, 'Aucune photo.')}`;
+    },
+    changes: { 'ph-file': async el => { await addPhotoFromFile(el.files[0]); el.value = ''; renderPage(pg); onChange(); } },
+    actions: {
+      'ph-view': el => openPhotoViewer(el.dataset.id, () => { renderPage(pg); onChange(); }),
+      'ph-compare': () => openPhotoCompare()
+    }
+  });
+}
+function openPhotoViewer(id, onChange) {
+  const ph = (photosCache || []).find(p => p.id === id); if (!ph) return;
+  const sh = openSheet({
+    full: true,
+    html: `<div class="sheet-top"><span></span><h3>${fmtDateY(ph.date)}</h3><button class="link-btn strong" data-action="sheet-close">OK</button></div>
+      <img class="ph-full" src="${ph.data}" alt="">
+      <label class="lbl">Date de la photo</label><input class="field" type="date" data-input="pv-date" value="${ph.date}" max="${dayKey(Date.now())}">
+      <button class="btn-plain danger" data-action="pv-del">Supprimer la photo</button>`,
+    inputs: { 'pv-date': async el => { if (!el.value) return; ph.date = el.value; await DB.put('photos', ph); onChange(); } },
+    actions: {
+      'pv-del': async () => {
+        if (!await confirmSheet('Supprimer cette photo ?', 'Elle sera effacée de ce téléphone.', 'Supprimer', true)) return;
+        await DB.del('photos', id);
+        photosCache = photosCache.filter(p => p.id !== id);
+        sh.close(); onChange();
+      }
+    }
+  });
+}
+/** Comparaison côte à côte : touche « Avant » ou « Après », puis une miniature */
+function openPhotoCompare() {
+  const list = photosSorted();
+  if (list.length < 2) return;
+  const st = { a: list[0].id, b: list[list.length - 1].id, target: 'a' };
+  const get = id => list.find(p => p.id === id);
+  const body = () => {
+    const A = get(st.a), B = get(st.b);
+    const days = Math.round((parseDayKey(B.date) - parseDayKey(A.date)) / DAY);
+    return `<div class="sheet-top"><span></span><h3>Avant / après</h3><button class="link-btn strong" data-action="sheet-close">OK</button></div>
+      <div class="cmp">${[['a', 'AVANT', A], ['b', 'APRÈS', B]].map(([k, l, p]) => `<button class="cmp-col ${st.target === k ? 'on' : ''}" data-action="cmp-target" data-v="${k}">
+        <span class="cmp-l">${l}</span><img src="${p.data}" alt=""><span class="cmp-d">${fmtDateY(p.date)}</span></button>`).join('')}</div>
+      <p class="muted sm center">${days > 0 ? `${days} jours d'écart` : days < 0 ? `${-days} jours d'écart` : 'Même jour'} · touche « Avant » ou « Après » puis choisis une photo</p>
+      <div class="ph-strip">${[...list].reverse().map(p => `<button class="ph-thumb ${p.id === st.a || p.id === st.b ? 'sel' : ''}" data-action="cmp-pick" data-id="${p.id}"><img src="${p.data}" alt="" loading="lazy"><span>${fmtDateShort(parseDayKey(p.date))}</span></button>`).join('')}</div>`;
+  };
+  const sh = openSheet({
+    full: true, html: body(),
+    actions: {
+      'cmp-target': el => { st.target = el.dataset.v; sh.set(body()); },
+      'cmp-pick': el => { st[st.target] = el.dataset.id; st.target = st.target === 'a' ? 'b' : 'a'; sh.set(body()); }
     }
   });
 }
@@ -2446,8 +2916,8 @@ ACTIONS['open-settings'] = () => {
   });
 };
 
-function exportBackup() {
-  const data = { app: 'GymLog', version: 1, exportedAt: new Date().toISOString(), settings: S.settings, ...S.data };
+async function exportBackup() {
+  const data = { app: 'GymLog', version: 2, exportedAt: new Date().toISOString(), settings: S.settings, ...S.data, photos: await loadPhotos() };
   const blob = new Blob([JSON.stringify(data, null, 1)], { type: 'application/json' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
@@ -2461,7 +2931,7 @@ async function importBackup(file) {
     const data = JSON.parse(await file.text());
     if (data.app !== 'GymLog') throw new Error('format');
     if (!await confirmSheet('Importer la sauvegarde ?', 'Tes données actuelles seront remplacées.', 'Importer', true)) return;
-    for (const st of ['exercises', 'workouts', 'templates', 'folders', 'measurements']) {
+    for (const st of ['exercises', 'workouts', 'templates', 'folders', 'measurements', 'photos']) {
       await DB.clear(st);
       await DB.putMany(st, Array.isArray(data[st]) ? data[st] : []);
     }
@@ -2472,31 +2942,35 @@ async function importBackup(file) {
 
 /* ===================== 10. GRAPHIQUES SVG ================================ */
 /**
- * Courbe(s) responsive. series = [{ color, points:[{x (timestamp), y}] }]
- * options : yFmt (format des valeurs), area (remplissage), zero (ligne 0)
+ * Courbe(s) responsive.
+ * series = [{ color, points:[{x (timestamp), y, rec?}], area?, dash?, marker?, width?, opacity?, noEnd? }]
+ *  - area : remplissage dégradé sous la courbe
+ *  - dash : pointillés (ex. '6 4') ; marker : 'circle' | 'square' | 'triangle' | 'diamond' sur chaque point
+ *  - points marqués rec: true -> point violet « record »
+ * options : yFmt (format des valeurs), zero (inclure la ligne 0), yMin0 (axe qui part de 0)
  */
-function lineChart(series, { h = 170, w = 340, yFmt = v => v, area = false, zero = false } = {}) {
+function lineChart(series, { h = 170, w = 340, yFmt = v => v, zero = false, yMin0 = false, area = false } = {}) {
   const all = series.flatMap(s => s.points);
   if (all.length < 2) return '<p class="empty-sm">Pas assez de données.</p>';
   let minX = Math.min(...all.map(p => p.x)), maxX = Math.max(...all.map(p => p.x));
   let minY = Math.min(...all.map(p => p.y)), maxY = Math.max(...all.map(p => p.y));
   if (zero) { minY = Math.min(minY, 0); maxY = Math.max(maxY, 0); }
-  if (area && !zero) minY = Math.min(minY, minY > 0 ? minY * 0.9 : minY);
+  if (yMin0) minY = Math.min(minY, 0);
   if (minY === maxY) { minY -= 1; maxY += 1; }
-  const padY = (maxY - minY) * 0.1; minY -= area && minY >= 0 ? 0 : padY; maxY += padY;
+  const pad = (maxY - minY) * 0.1;
+  if (!(yMin0 && minY === 0)) minY -= pad;
+  maxY += pad;
   if (maxX === minX) maxX = minX + DAY;
-  const pl = 40, pr = 10, pt = 10, pb = 22;
+  const pl = 42, pr = 10, pt = 10, pb = 22;
   const sx = x => pl + (x - minX) / (maxX - minX) * (w - pl - pr);
   const sy = y => pt + (1 - (y - minY) / (maxY - minY)) * (h - pt - pb);
   const gid = 'g' + Math.random().toString(36).slice(2, 7);
-  let out = `<svg class="chart" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">`;
-  // Grille horizontale + valeurs
-  for (let i = 0; i <= 3; i++) {
-    const v = minY + (maxY - minY) * i / 3, y = sy(v);
+  let out = `<svg class="chart" viewBox="0 0 ${w} ${h}">`;
+  for (let i = 0; i <= 4; i++) {
+    const v = minY + (maxY - minY) * i / 4, y = sy(v);
     out += `<line x1="${pl}" x2="${w - pr}" y1="${y}" y2="${y}" class="grid"/><text x="${pl - 6}" y="${y + 3}" text-anchor="end" class="axis">${esc(yFmt(v))}</text>`;
   }
   if (zero && minY < 0 && maxY > 0) out += `<line x1="${pl}" x2="${w - pr}" y1="${sy(0)}" y2="${sy(0)}" class="zero"/>`;
-  // Dates
   [minX, (minX + maxX) / 2, maxX].forEach((x, i) => {
     out += `<text x="${sx(x)}" y="${h - 6}" text-anchor="${['start', 'middle', 'end'][i]}" class="axis">${fmtDateShort(x)}</text>`;
   });
@@ -2504,13 +2978,14 @@ function lineChart(series, { h = 170, w = 340, yFmt = v => v, area = false, zero
     const pts = [...s.points].sort((a, b) => a.x - b.x);
     if (!pts.length) return;
     const d = pts.map((p, i) => `${i ? 'L' : 'M'}${sx(p.x).toFixed(1)},${sy(p.y).toFixed(1)}`).join('');
-    if (area) {
+    if (s.area ?? (area && si === 0)) {
       out += `<defs><linearGradient id="${gid}${si}" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="${s.color}" stop-opacity=".28"/><stop offset="1" stop-color="${s.color}" stop-opacity="0"/></linearGradient></defs>`;
       out += `<path d="${d}L${sx(pts[pts.length - 1].x).toFixed(1)},${sy(minY)}L${sx(pts[0].x).toFixed(1)},${sy(minY)}Z" fill="url(#${gid}${si})"/>`;
     }
-    out += `<path d="${d}" fill="none" stroke="${s.color}" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/>`;
-    const lp = pts[pts.length - 1];
-    out += `<circle cx="${sx(lp.x)}" cy="${sy(lp.y)}" r="3.5" fill="${s.color}" stroke="var(--card)" stroke-width="1.5"/>`;
+    out += `<path d="${d}" fill="none" stroke="${s.color}" stroke-width="${s.width || 2.4}" ${s.dash ? `stroke-dasharray="${s.dash}"` : ''} ${s.opacity ? `opacity="${s.opacity}"` : ''} stroke-linejoin="round" stroke-linecap="round"/>`;
+    if (s.marker) pts.forEach(p => { out += markerSvg(sx(p.x), sy(p.y), s.marker, s.color); });
+    pts.filter(p => p.rec).forEach(p => { out += `<circle cx="${sx(p.x)}" cy="${sy(p.y)}" r="4.6" fill="var(--rec)" stroke="var(--card)" stroke-width="1.6"/>`; });
+    if (!s.marker && !s.noEnd) { const lp = pts[pts.length - 1]; out += `<circle cx="${sx(lp.x)}" cy="${sy(lp.y)}" r="3.8" fill="${s.color}" stroke="var(--card)" stroke-width="1.6"/>`; }
   });
   return out + '</svg>';
 }
@@ -2653,6 +3128,9 @@ async function init() {
   const have = new Set(S.data.exercises.map(e => e.id));
   const missing = GYM_EXERCISES.filter(e => !have.has(e.id));
   if (missing.length) { S.data.exercises.push(...missing); await DB.putMany('exercises', missing); }
+  const defs = new Map(GYM_EXERCISES.map(e => [e.id, e]));
+  const upd = S.data.exercises.filter(e => { const d = defs.get(e.id); if (!d || (e.level === d.level && e.instructions === d.instructions)) return false; e.level = d.level; e.instructions = d.instructions; return true; });
+  if (upd.length) await DB.putMany('exercises', upd);
   rebuildExIndex();
 
   if (!S.settings.seeded) {
