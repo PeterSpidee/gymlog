@@ -26,7 +26,7 @@ const cap = s => s.charAt(0).toUpperCase() + s.slice(1);
 const norm = s => String(s).normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
 const DAY = 864e5;
 /** Version affichée dans Réglages (à augmenter à chaque mise en ligne) */
-const APP_VERSION = '1.5';
+const APP_VERSION = '1.6';
 
 const MONTHS = ['Janvier', 'Février', 'Mars', 'Avril', 'Mai', 'Juin', 'Juillet', 'Août', 'Septembre', 'Octobre', 'Novembre', 'Décembre'];
 const MONTHS_SHORT = ['janv.', 'févr.', 'mars', 'avr.', 'mai', 'juin', 'juil.', 'août', 'sept.', 'oct.', 'nov.', 'déc.'];
@@ -53,7 +53,7 @@ function fmtDur(sec) {
 }
 function fmtNum(n, dec = 0) { return Number(n || 0).toLocaleString('fr-FR', { maximumFractionDigits: dec }); }
 /** Volume compact : "8 450 kg", "12,4 t" */
-function fmtVol(v) { return v >= 10000 ? `${fmtNum(v / 1000, 1)} t` : `${fmtNum(v)} ${unit()}`; }
+function fmtVol(v) { v = toU(v || 0); return v >= 10000 ? `${fmtNum(v / 1000, 1)} ${isLbs() ? 'k lbs' : 't'}` : `${fmtNum(v)} ${unit()}`; }
 function fmtHour(ts) { const d = new Date(ts); return `${pad(d.getHours())}:${pad(d.getMinutes())}`; }
 function fmtDateLong(ts) { const d = new Date(ts); return `${cap(DAYS_SHORT[d.getDay()])} ${d.getDate()} ${MONTHS_SHORT[d.getMonth()]}`; }
 function fmtDateShort(ts) { const d = new Date(ts); return `${d.getDate()} ${MONTHS_SHORT[d.getMonth()]}`; }
@@ -75,6 +75,13 @@ function parseNum(v) {
 /** 1RM estimé — formule d'Epley */
 function e1rm(w, r) { if (!w || !r) return 0; return r === 1 ? w : w * (1 + r / 30); }
 const unit = () => S.settings.units || 'kg';
+/* Conversion d'unités : les poids sont TOUJOURS stockés en kg ; on convertit à l'affichage et à la saisie */
+const LB = 2.20462;
+const isLbs = () => S.settings.units === 'lbs';
+const toU = kg => kg == null ? null : (isLbs() ? kg * LB : kg);
+const fromU = v => v == null ? null : (isLbs() ? v / LB : v);
+/** Poids formaté dans l'unité choisie */
+const fmtW = (kg, dec = 2) => fmtNum(toU(kg || 0), isLbs() ? Math.min(dec, 1) : dec);
 const vibrate = p => { try { navigator.vibrate && navigator.vibrate(p); } catch (e) { /* iOS : non supporté */ } };
 
 /* ============================== 2. ICÔNES ================================ */
@@ -149,12 +156,16 @@ const workoutsDesc = () => [...S.data.workouts].sort((a, b) => b.startTime - a.s
 /** Statistiques d'un entraînement (enregistré ou en cours) */
 function wStats(w) {
   let volume = 0, sets = 0, pr = 0, total = 0;
-  for (const ex of w.exercises) for (const s of ex.sets) {
-    total++;
-    if (!s.completed) continue;
-    sets++;
-    volume += (s.weight || 0) * (s.reps || 0);
-    if (s.isRecord) pr++;
+  for (const ex of w.exercises) {
+    if (ex.kind === 'circuit') { const c = circuitStats(ex); volume += c.volume; sets += c.sets; total += c.total; continue; }
+    for (const s of ex.sets) {
+      if (!isWork(s)) continue; // l'échauffement ne compte pas
+      total++;
+      if (!s.completed) continue;
+      sets++;
+      volume += (s.weight || 0) * (s.reps || 0);
+      if (s.isRecord) pr++;
+    }
   }
   return { volume, sets, pr, total };
 }
@@ -164,7 +175,7 @@ function muscleSets(workouts) {
   const m = {};
   for (const w of workouts) for (const ex of w.exercises) {
     const e = EX.get(ex.exerciseId); if (!e) continue;
-    const n = ex.sets.filter(s => s.completed).length; if (!n) continue;
+    const n = (ex.sets || []).filter(s => s.completed && isWork(s)).length; if (!n) continue;
     m[e.muscleGroup] = (m[e.muscleGroup] || 0) + n;
     if (e.secondaryMuscle) m[e.secondaryMuscle] = (m[e.secondaryMuscle] || 0) + n * 0.5;
   }
@@ -177,7 +188,7 @@ function bestE1RM(exerciseId, excludeId) {
   for (const w of S.data.workouts) {
     if (w.id === excludeId) continue;
     for (const ex of w.exercises) if (ex.exerciseId === exerciseId)
-      for (const s of ex.sets) if (s.completed) best = Math.max(best, e1rm(s.weight, s.reps));
+      for (const s of ex.sets) if (s.completed && isWork(s)) best = Math.max(best, e1rm(s.weight, s.reps));
   }
   return best;
 }
@@ -197,7 +208,8 @@ function exerciseHistory(exerciseId) {
   for (const w of [...S.data.workouts].sort((a, b) => a.startTime - b.startTime)) {
     const sets = w.exercises.filter(x => x.exerciseId === exerciseId).flatMap(x => x.sets.filter(s => s.completed));
     if (!sets.length) continue;
-    const best = sets.reduce((b, s) => e1rm(s.weight, s.reps) > e1rm(b.weight, b.reps) ? s : b, sets[0]);
+    const work = sets.filter(isWork).length ? sets.filter(isWork) : sets;
+    const best = work.reduce((b, s) => e1rm(s.weight, s.reps) > e1rm(b.weight, b.reps) ? s : b, work[0]);
     out.push({ w, sets, best, e1rm: e1rm(best.weight, best.reps), maxW: Math.max(...sets.map(s => s.weight || 0)), volume: sets.reduce((a, s) => a + (s.weight || 0) * (s.reps || 0), 0) });
   }
   return out;
@@ -216,7 +228,7 @@ async function recomputeAllRecords() {
     for (const ex of w.exercises) {
       let top = null, topV = 0;
       for (const s of ex.sets) {
-        const v = s.completed ? e1rm(s.weight, s.reps) : 0;
+        const v = s.completed && isWork(s) ? e1rm(s.weight, s.reps) : 0;
         if (v > topV) { topV = v; top = s; }
       }
       const prev = best[ex.exerciseId] || 0;
@@ -515,7 +527,7 @@ function workoutCard(w) {
     <span class="w-bar"></span>
     <span class="w-row-main">
       <span class="w-row-top"><b>${esc(w.name)}</b>${st.pr ? `<span class="pr-pill">+${st.pr} PR</span>` : ''}</span>
-      <span class="w-row-meta"><span class="mono">${fmtHour(w.startTime)} → ${fmtHour(w.endTime)}</span> · ${fmtDur(w.duration)} · ${st.sets} série${st.sets > 1 ? 's' : ''} · ${fmtNum(st.volume)} ${unit()}</span>
+      <span class="w-row-meta"><span class="mono">${fmtHour(w.startTime)} → ${fmtHour(w.endTime)}</span> · ${fmtDur(w.duration)} · ${st.sets} série${st.sets > 1 ? 's' : ''} · ${fmtW(st.volume, 0)} ${unit()}</span>
     </span>
   </button>`;
 }
@@ -569,7 +581,7 @@ ACTIONS['log-past'] = () => {
         startWorkout({
           name: d.name.trim() || 'Entraînement libre', templateId: t ? t.id : null,
           startTime: start.getTime(), manual: true, durationMin: d.dur,
-          exercises: t ? t.exercises.map(e => ({ exerciseId: e.exerciseId, restTime: e.restTime, tempo: e.tempo, targetReps: e.targetReps, nSets: e.targetSets || 3 })) : []
+          exercises: t ? t.exercises.map(e => ({ exerciseId: e.exerciseId, restTime: e.restTime, tempo: e.tempo, targetReps: e.targetReps, supersetId: e.supersetId, nSets: e.targetSets || 3 })) : []
         });
       }
     }
@@ -600,7 +612,7 @@ function openWorkoutDetail(id) {
           if (!sets.length) return '';
           return `<div class="card">
             <div class="ex-head tap" data-action="open-exercise" data-id="${ex.exerciseId}">${exThumb(e)}<div class="ex-info"><h3>${esc(exName(ex.exerciseId))}</h3><span class="muted sm">${sets.length} série${sets.length > 1 ? 's' : ''}</span></div><span class="chev-r">${ICON.chevR}</span></div>
-            <div class="hist-sets">${sets.map((s, i) => `<div class="hist-set ${s.isRecord ? 'rec' : ''}"><span class="n">${i + 1}</span><span>${fmtNum(s.weight, 2)} ${unit()} × ${s.reps}</span><span class="muted sm">1RM ${fmtNum(e1rm(s.weight, s.reps), 1)}</span>${s.isRecord ? '<span class="rec-badge">RECORD</span>' : ''}</div>`).join('')}</div>
+            <div class="hist-sets">${sets.map((s, i) => `<div class="hist-set ${s.isRecord ? 'rec' : ''}"><span class="n">${i + 1}</span><span>${fmtW(s.weight)} ${unit()} × ${s.reps}</span><span class="muted sm">1RM ${fmtW(e1rm(s.weight, s.reps), 1)}</span>${s.isRecord ? '<span class="rec-badge">RECORD</span>' : ''}</div>`).join('')}</div>
           </div>`;
         }).join('')}
         <button class="btn-soft wide" data-action="summary">${ICON.check}<span>Voir le résumé</span></button>
@@ -613,7 +625,7 @@ function openWorkoutDetail(id) {
         const w = S.data.workouts.find(x => x.id === id);
         startWorkout({
           name: w.name, templateId: w.templateId,
-          exercises: w.exercises.map(ex => ({ exerciseId: ex.exerciseId, restTime: ex.restTime, tempo: ex.tempo, nSets: Math.max(1, ex.sets.filter(s => s.completed).length) }))
+          exercises: w.exercises.filter(ex => !ex.circuit).map(ex => ({ exerciseId: ex.exerciseId, restTime: ex.restTime, tempo: ex.tempo, targetReps: ex.targetReps, supersetId: ex.supersetId, nSets: Math.max(1, ex.sets.filter(s => s.completed).length) }))
         });
       },
       del: async () => {
@@ -767,7 +779,7 @@ function openTemplateStats(id) {
       const best = rows.reduce((b, r) => r.volume > b.volume ? r : b, rows[0]);
       const first = rows[0], last = rows[rows.length - 1];
       const evo = first.volume ? (last.volume - first.volume) / first.volume * 100 : 0;
-      const metric = { volume: r => r.volume, duree: r => (r.w.duration || 0) / 60, series: r => r.sets }[st.metric];
+      const metric = { volume: r => toU(r.volume), duree: r => (r.w.duration || 0) / 60, series: r => r.sets }[st.metric];
       const fmtY = { volume: v => v >= 1000 ? fmtNum(v / 1000, 1) + 't' : fmtNum(v), duree: v => fmtNum(v) + ' min', series: v => fmtNum(v) }[st.metric];
       // Progression du 1RM estimé par exercice (1re fois -> dernière fois dans cette séance)
       const exProg = t.exercises.map(e => {
@@ -778,7 +790,7 @@ function openTemplateStats(id) {
         if (!pts.length) return '';
         const d = pts.length > 1 && pts[0] ? (pts[pts.length - 1] - pts[0]) / pts[0] * 100 : null;
         return `<button class="rec-row tap" data-action="open-exercise" data-id="${e.exerciseId}">${exThumb(EX.get(e.exerciseId))}
-          <span class="ex-row-txt"><b>${esc(exName(e.exerciseId))}</b><span class="muted sm">1RM estimé : ${fmtNum(pts[0], 1)} → ${fmtNum(pts[pts.length - 1], 1)} ${unit()}</span></span>
+          <span class="ex-row-txt"><b>${esc(exName(e.exerciseId))}</b><span class="muted sm">1RM estimé : ${fmtW(pts[0], 1)} → ${fmtW(pts[pts.length - 1], 1)} ${unit()}</span></span>
           ${d == null ? '' : `<span class="delta ${d >= 0 ? 'up' : 'down'}">${d >= 0 ? '▲' : '▼'} ${fmtNum(Math.abs(d))} %</span>`}</button>`;
       }).join('');
       return `
@@ -815,7 +827,7 @@ document.addEventListener('pointerdown', e => {
   item.classList.add('dragging');
   document.body.classList.add('is-dragging');
   try { h.setPointerCapture(e.pointerId); } catch (_) { }
-  drag = { item, ph, kind: item.dataset.kind, startY: e.clientY, top: r.top, y: e.clientY, scroller: $('#views') };
+  drag = { item, ph, kind: item.dataset.kind, startY: e.clientY, top: r.top, y: e.clientY, scroller: item.closest('.w-body') || item.closest('.page-body') || $('#views') };
   vibrate(10);
   drag.raf = requestAnimationFrame(autoScroll);
 }, { passive: false });
@@ -831,7 +843,7 @@ document.addEventListener('pointermove', e => {
 /** Déplace l'emplacement en pointillés selon la position du doigt */
 function placePlaceholder() {
   const { kind, y, ph, item } = drag;
-  const lists = $$(`.dnd-list[data-dnd="${kind === 'folder' ? 'folders' : 'tpl'}"]`).filter(l => l.offsetParent !== null);
+  const lists = $$(`.dnd-list[data-dnd="${kind === 'folder' ? 'folders' : kind === 'wex' ? 'wex' : 'tpl'}"]`).filter(l => l.offsetParent !== null);
   if (!lists.length) return;
   // liste visée : celle qui contient le doigt, sinon la plus proche
   let target = lists[0], bestD = Infinity;
@@ -864,6 +876,17 @@ async function endDrag() {
   item.removeAttribute('style');
   item.classList.remove('dragging');
   document.body.classList.remove('is-dragging');
+  if (kind === 'wex') {
+    // Exercices de la séance en cours : nouvel ordre d'après le DOM
+    const a = S.active, old = a.exercises;
+    const order = $$('.dnd-list[data-dnd="wex"] > [data-kind="wex"]').map(el => +el.dataset.dragId);
+    a.exercises = order.map(k => old[k]);
+    if (a.rest) a.rest.exIdx = order.indexOf(a.rest.exIdx);
+    if (a.restReady) a.restReady.exIdx = order.indexOf(a.restReady.exIdx);
+    cleanSupersets(a.exercises);
+    persistActive(); vibrate(8); renderWorkout();
+    return;
+  }
   if (kind === 'folder') {
     $$('.dnd-list[data-dnd="folders"] > [data-kind="folder"]').forEach((el, i) => { const f = S.data.folders.find(x => x.id === el.dataset.dragId); if (f) f.order = i; });
     await DB.putMany('folders', S.data.folders);
@@ -889,7 +912,7 @@ ACTIONS['start-template'] = el => {
   const t = S.data.templates.find(x => x.id === el.dataset.id); if (!t) return;
   startWorkout({
     name: t.name, templateId: t.id,
-    exercises: t.exercises.map(e => ({ exerciseId: e.exerciseId, restTime: e.restTime, tempo: e.tempo, targetReps: e.targetReps, nSets: e.targetSets || 3 }))
+    exercises: t.exercises.map(e => ({ exerciseId: e.exerciseId, restTime: e.restTime, tempo: e.tempo, targetReps: e.targetReps, supersetId: e.supersetId, nSets: e.targetSets || 3 }))
   });
 };
 ACTIONS['new-template'] = () => openTemplateEditor(null);
@@ -948,13 +971,13 @@ function openTemplateEditor(id, folderId = null) {
       </select>
       <div class="section-head"><h2>Exercices</h2><span class="muted">~${estimateDuration(draft)} min</span></div>
       ${draft.exercises.map((e, i) => `
-        <div class="card tpl-ex-card">
+        <div class="card tpl-ex-card ${e.supersetId ? 'ss' : ''}">${e.supersetId && !(draft.exercises[i - 1] && draft.exercises[i - 1].supersetId === e.supersetId) ? '<span class="ss-label">SUPERSET</span>' : ''}
           <div class="ex-head">${exThumb(EX.get(e.exerciseId))}<div class="ex-info"><h3>${esc(exName(e.exerciseId))}</h3></div>
             <button class="icon-btn" data-action="tpl-ex-menu" data-i="${i}">${ICON.more}</button></div>
           <div class="tpl-params">
             <div class="param"><span>Séries</span><div class="stepper">
               <button data-action="tpl-sets" data-i="${i}" data-d="-1">−</button><b>${e.targetSets}</b><button data-action="tpl-sets" data-i="${i}" data-d="1">+</button></div></div>
-            <div class="param"><span>Reps</span><input class="field sm" inputmode="numeric" data-input="tpl-reps" data-i="${i}" value="${e.targetReps ?? ''}" placeholder="10"></div>
+            <div class="param"><span>Reps</span><input class="field sm" data-input="tpl-reps" data-change="tpl-reps-ok" data-i="${i}" value="${esc(e.targetReps ?? '')}" placeholder="8-12" autocomplete="off"></div>
             <div class="param"><span>Repos</span><button class="chip-sm" data-action="tpl-rest" data-i="${i}">${ICON.timer}${fmtClock(e.restTime)}</button></div>
           </div>
         </div>`).join('') || '<p class="empty-sm">Ajoute des exercices à ta séance.</p>'}
@@ -962,10 +985,11 @@ function openTemplateEditor(id, folderId = null) {
       ${src ? `<button class="btn-primary" data-action="tpl-start">${ICON.play} Démarrer cette séance</button>
                <button class="btn-plain" data-action="tpl-dup">Dupliquer</button>
                <button class="btn-plain danger" data-action="tpl-del">Supprimer la séance</button>` : ''}`,
+    changes: { 'tpl-reps-ok': el => { if (el.value && !parseRange(el.value)) { toast('Reps : un nombre (10) ou une fourchette (8-12)'); el.value = draft.exercises[+el.dataset.i].targetReps || ''; } } },
     inputs: {
       'tpl-name': el => { draft.name = el.value; },
       'tpl-folder': el => { draft.folderId = el.value || null; },
-      'tpl-reps': el => { draft.exercises[+el.dataset.i].targetReps = parseInt(el.value, 10) || null; }
+      'tpl-reps': el => { const r = parseRange(el.value); draft.exercises[+el.dataset.i].targetReps = r ? r.text : null; }
     },
     actions: {
       'tpl-save': async () => {
@@ -975,7 +999,7 @@ function openTemplateEditor(id, folderId = null) {
         popPage(); refreshAll(); toast('Séance enregistrée');
       },
       'tpl-add': () => openPicker(ids => {
-        ids.forEach(exId => draft.exercises.push({ exerciseId: exId, restTime: S.settings.restTimerDefault, targetSets: 3, targetReps: 10, tempo: '' }));
+        ids.forEach(exId => draft.exercises.push({ exerciseId: exId, restTime: S.settings.restTimerDefault, targetSets: 3, targetReps: '10', tempo: '' }));
         renderPage(pg);
       }),
       'tpl-sets': el => {
@@ -993,8 +1017,11 @@ function openTemplateEditor(id, folderId = null) {
         actionSheet(exName(draft.exercises[i].exerciseId), [
           ...(i > 0 ? [{ label: 'Monter', fn: () => { const a = draft.exercises;[a[i - 1], a[i]] = [a[i], a[i - 1]]; renderPage(pg); } }] : []),
           ...(i < draft.exercises.length - 1 ? [{ label: 'Descendre', fn: () => { const a = draft.exercises;[a[i + 1], a[i]] = [a[i], a[i + 1]]; renderPage(pg); } }] : []),
+          ...(i < draft.exercises.length - 1 && !(draft.exercises[i].supersetId && draft.exercises[i + 1].supersetId === draft.exercises[i].supersetId)
+            ? [{ label: 'Superset avec l\'exercice suivant', fn: () => { const sid = draft.exercises[i].supersetId || draft.exercises[i + 1].supersetId || uid(); draft.exercises[i].supersetId = sid; draft.exercises[i + 1].supersetId = sid; renderPage(pg); } }] : []),
+          ...(draft.exercises[i].supersetId ? [{ label: 'Retirer du superset', fn: () => { draft.exercises[i].supersetId = null; cleanSupersets(draft.exercises); renderPage(pg); } }] : []),
           { label: 'Tempo', fn: async () => { const v = await inputSheet('Tempo', draft.exercises[i].tempo || '', 'Ex. : 3-1-1-0'); if (v != null) { draft.exercises[i].tempo = v; renderPage(pg); } } },
-          { label: 'Retirer l\'exercice', danger: true, fn: () => { draft.exercises.splice(i, 1); renderPage(pg); } }
+          { label: 'Retirer l\'exercice', danger: true, fn: () => { draft.exercises.splice(i, 1); cleanSupersets(draft.exercises); renderPage(pg); } }
         ]);
       },
       'tpl-start': async () => {
@@ -1140,18 +1167,19 @@ function exerciseDetailHtml(id) {
   return `
     <div class="ex-detail-head">${exThumb(e)}<div><h1>${esc(e.name)}</h1>
       <p class="muted">${MUSCLES[e.muscleGroup]}${e.secondaryMuscle ? ' · ' + MUSCLES[e.secondaryMuscle] : ''} · ${EQUIPMENT[e.equipment]}</p></div></div>
+    ${e.note ? `<div class="card note-card">${ICON.note}<p>${esc(e.note)}</p></div>` : ''}
     <div class="stat-grid">
-      <div class="card stat"><span>1RM estimé</span><b>${best ? fmtNum(best.e1rm, 1) : '—'}<small> ${unit()}</small></b></div>
-      <div class="card stat"><span>Charge max</span><b>${maxW ? fmtNum(maxW, 2) : '—'}<small> ${unit()}</small></b></div>
+      <div class="card stat"><span>1RM estimé</span><b>${best ? fmtW(best.e1rm, 1) : '—'}<small> ${unit()}</small></b></div>
+      <div class="card stat"><span>Charge max</span><b>${maxW ? fmtW(maxW) : '—'}<small> ${unit()}</small></b></div>
       <div class="card stat"><span>Séances</span><b>${hist.length}</b></div>
       <div class="card stat"><span>Séries</span><b>${totalSets}</b></div>
     </div>
-    ${hist.length >= 2 ? `<div class="card"><h3 class="card-title">Évolution du 1RM estimé</h3>${lineChart([{ color: 'var(--accent)', points: hist.map(h => ({ x: h.w.startTime, y: h.e1rm })) }], { yFmt: v => fmtNum(v), area: true })}</div>` : ''}
-    ${best ? `<div class="card rec-card">${ICON.trophy}<div><b>Meilleure série : ${fmtNum(best.best.weight, 2)} ${unit()} × ${best.best.reps}</b><span class="muted sm">${fmtDateLong(best.w.startTime)} · 1RM ${fmtNum(best.e1rm, 1)} ${unit()}</span></div></div>` : ''}
+    ${hist.length >= 2 ? `<div class="card"><h3 class="card-title">Évolution du 1RM estimé</h3>${lineChart([{ color: 'var(--accent)', points: hist.map(h => ({ x: h.w.startTime, y: toU(h.e1rm) })) }], { yFmt: v => fmtNum(v), area: true })}</div>` : ''}
+    ${best ? `<div class="card rec-card">${ICON.trophy}<div><b>Meilleure série : ${fmtW(best.best.weight)} ${unit()} × ${best.best.reps}</b><span class="muted sm">${fmtDateLong(best.w.startTime)} · 1RM ${fmtW(best.e1rm, 1)} ${unit()}</span></div></div>` : ''}
     <div class="section-head"><h2>Historique</h2></div>
     ${hist.length ? [...hist].reverse().slice(0, 30).map(h => `<div class="card hist-item">
         <div class="hist-top"><b>${esc(h.w.name)}</b><span class="muted sm">${fmtDateLong(h.w.startTime)}</span></div>
-        <div class="hist-chips">${h.sets.map(s => `<span class="set-chip ${s.isRecord ? 'rec' : ''}">${fmtNum(s.weight, 2)}×${s.reps}</span>`).join('')}</div>
+        <div class="hist-chips">${h.sets.map(s => `<span class="set-chip ${s.isRecord ? 'rec' : ''}">${fmtW(s.weight)}×${s.reps}</span>`).join('')}</div>
       </div>`).join('') : '<p class="empty-sm">Pas encore réalisé. Ton historique apparaîtra ici.</p>'}
     ${e.isCustom ? `<button class="btn-plain danger" data-action="ex-del" data-id="${e.id}">Supprimer cet exercice</button>` : ''}`;
 }
@@ -1180,11 +1208,35 @@ function persistActive() {
     else localStorage.removeItem(ACTIVE_KEY);
   } catch (e) { /* stockage plein */ }
 }
-const newSet = n => ({ setNumber: n, weight: null, reps: null, completed: false, isRecord: false, timestamp: null });
+const newSet = n => ({ setNumber: n, weight: null, reps: null, completed: false, isRecord: false, timestamp: null, type: 'normal' });
+
+/** Types de séries. L'échauffement ne compte ni dans le volume, ni dans les records. */
+const SET_TYPES = {
+  normal: { label: 'Série normale', short: '' },
+  warmup: { label: 'Échauffement', short: 'É' },
+  drop: { label: 'Drop set', short: 'D' },
+  failure: { label: 'Jusqu\'à l\'échec', short: 'F' }
+};
+const isWork = s => (s.type || 'normal') !== 'warmup';
+
+/** "5-8" -> { min: 5, max: 8, text: "5-8" } ; "10" -> { min: 10, max: 10 } */
+function parseRange(v) {
+  if (v == null || v === '') return null;
+  const m = String(v).match(/^\s*(\d+)\s*(?:[-–à]\s*(\d+))?\s*$/);
+  if (!m) return null;
+  const a = +m[1], b = m[2] ? +m[2] : a;
+  const min = Math.min(a, b), max = Math.max(a, b);
+  return { min, max, text: min === max ? String(min) : `${min}-${max}` };
+}
+
+ICON.note = svg('<rect x="5" y="3" width="14" height="18" rx="2.5"/><path d="M9 8h6M9 12h6M9 16h3.5"/>');
+ICON.metro = svg('<path d="M9 3h6l3.5 18h-13z"/><path d="M12 15l5-8"/>');
+ICON.pause = svg('<path d="M8.5 5v14M15.5 5v14"/>', 3);
+ICON.circuit = svg('<path d="M20 12a8 8 0 1 1-2.3-5.7"/><path d="M20 4v4h-4"/>');
 
 /**
  * Démarre un entraînement.
- * spec = { name, templateId, exercises: [{ exerciseId, restTime, tempo, targetReps, nSets }] }
+ * spec = { name, templateId, exercises: [{ exerciseId, restTime, tempo, targetReps, nSets, supersetId }] }
  */
 async function startWorkout(spec) {
   if (S.active) {
@@ -1195,13 +1247,15 @@ async function startWorkout(spec) {
   unlockAudio();
   S.active = {
     id: uid(), name: spec.name, templateId: spec.templateId || null,
-    startTime: spec.startTime || Date.now(), minimized: false, rest: null,
+    startTime: spec.startTime || Date.now(), minimized: false, rest: null, restReady: null,
+    pausedAt: null, pausedTotal: 0,
     manual: !!spec.manual, durationMin: spec.durationMin || null,
     exercises: spec.exercises.filter(e => EX.has(e.exerciseId)).map(e => ({
       exerciseId: e.exerciseId,
       restTime: e.restTime ?? S.settings.restTimerDefault,
       tempo: e.tempo || '',
-      targetReps: e.targetReps || null,
+      targetReps: e.targetReps != null && e.targetReps !== '' ? String(e.targetReps) : null,
+      supersetId: e.supersetId || null,
       sets: Array.from({ length: e.nSets || 3 }, (_, k) => newSet(k + 1))
     }))
   };
@@ -1211,15 +1265,59 @@ async function startWorkout(spec) {
   if (!spec.manual) requestNotifPermission();
 }
 
-/** Valeurs "fantômes" proposées pour une série (précédente séance ou série du dessus) */
+/** Durée écoulée en secondes (pauses déduites) */
+function elapsedSec(a = S.active) {
+  if (a.manual) return (a.durationMin || 0) * 60;
+  const now = a.pausedAt || Date.now();
+  return Math.max(0, (now - a.startTime - (a.pausedTotal || 0)) / 1000);
+}
+
+/** Valeurs proposées pour une série : charge de la séance précédente, reps cibles */
 function placeholderFor(ex, j, prev) {
   const p = prev[j] || (j > 0 ? ex.sets[j - 1] : null) || prev[prev.length - 1];
+  const range = parseRange(ex.targetReps);
+  const pReps = p && p.reps != null ? p.reps : null;
   return {
     weight: p && p.weight != null ? p.weight : null,
-    reps: p && p.reps != null ? p.reps : ex.targetReps
+    reps: range ? range.text : pReps,
+    repsFill: pReps != null && (!range || (pReps >= range.min && pReps <= range.max)) ? pReps : (range ? range.min : null)
   };
 }
 
+/** Ordre d'exécution [exIdx, setIdx] : les supersets alternent les exercices */
+function setOrder(a = S.active) {
+  const out = [], ex = a.exercises;
+  for (let i = 0; i < ex.length;) {
+    if (ex[i].kind === 'circuit') { i++; continue; }
+    let j = i;
+    const sid = ex[i].supersetId;
+    if (sid) while (j + 1 < ex.length && ex[j + 1].kind !== 'circuit' && ex[j + 1].supersetId === sid) j++;
+    const group = [];
+    for (let k = i; k <= j; k++) group.push(k);
+    const max = Math.max(...group.map(k => ex[k].sets.length));
+    for (let s = 0; s < max; s++) for (const k of group) if (s < ex[k].sets.length) out.push([k, s]);
+    i = j + 1;
+  }
+  return out;
+}
+/** Prochaine série à faire (la « série en cours ») */
+function currentSet(a = S.active) {
+  return setOrder(a).find(([i, j]) => !a.exercises[i].sets[j].completed) || null;
+}
+/** Numéro affiché : É pour l'échauffement, sinon 1, 2, 3… (sans compter l'échauffement) */
+function setLabel(ex, j) {
+  if (!isWork(ex.sets[j])) return 'É';
+  let n = 0;
+  for (let k = 0; k <= j; k++) if (isWork(ex.sets[k])) n++;
+  return String(n);
+}
+function inputW(kg) {
+  if (kg == null) return '';
+  const v = toU(kg);
+  return String(Math.round(v * 100) / 100).replace('.', ',');
+}
+
+/* ----------------------------- Rendu ------------------------------------ */
 function renderWorkout(animateOpen = false) {
   const a = S.active;
   const root = $('#workout-root');
@@ -1227,24 +1325,37 @@ function renderWorkout(animateOpen = false) {
   const body = $('.w-body', root);
   const scroll = body ? body.scrollTop : 0;
   const st = wStats(a);
+  const paused = !!a.pausedAt;
+  const cur = currentSet(a);
+  const started = (Date.now() - a.startTime) < 90000 ? 'MAINTENANT' : 'DÉBUT ' + fmtHour(a.startTime);
+  const kicker = a.manual ? `SAISIE · ${fmtDateShort(a.startTime).toUpperCase()}` : paused ? 'EN PAUSE' : `LIVE · ${started}`;
   root.innerHTML = `
-    <div class="w-screen ${a.rest ? 'has-rest' : ''}">
-      <header class="w-head">
-        <div class="w-top">
-          <button class="icon-btn" data-action="w-minimize" aria-label="Réduire">${ICON.minimize}</button>
-          <div class="w-title">${a.manual ? `<span class="live manual">SAISIE · ${fmtDateShort(a.startTime).toUpperCase()}</span>` : '<span class="live"><i></i>LIVE</span>'}<h2 data-action="w-rename">${esc(a.name)}</h2></div>
-          <button class="btn-finish" data-action="w-finish">Terminer</button>
-        </div>
-        <div class="w-stats">
-          <div>${a.manual ? `<b>${fmtDur(a.durationMin * 60)}</b>` : `<b id="w-elapsed">${fmtClock((Date.now() - a.startTime) / 1000)}</b>`}<span>Durée</span></div>
-          <div><b id="w-volume">${fmtNum(st.volume)} ${unit()}</b><span>Volume</span></div>
-          <div><b id="w-sets">${st.sets} / ${st.total}</b><span>Séries</span></div>
+    <div class="w-screen ${a.rest || a.restReady ? 'has-rest' : ''}">
+      <header class="wh">
+        <div class="wh-card">
+          <div class="wh-top">
+            <button class="circle-btn" data-action="w-minimize" aria-label="Réduire">${ICON.chevD}</button>
+            <div class="wh-title"><span class="live-k ${a.manual ? 'manual' : paused ? 'paused' : ''}"><i></i>${kicker}</span><h2 data-action="w-rename">${esc(a.name)}</h2></div>
+            <button class="circle-btn" data-action="w-timer-menu" aria-label="Minuteur de repos">${ICON.timer}</button>
+            <button class="circle-btn" data-action="w-menu" aria-label="Options de la séance">${ICON.more}</button>
+          </div>
+          <div class="wh-stats">
+            <button class="wh-cell time ${paused ? 'paused' : ''}" data-action="w-pause" aria-label="${paused ? 'Reprendre' : 'Mettre en pause'}">
+              <span>TEMPS</span><b><em id="w-elapsed">${a.manual ? fmtDur(elapsedSec(a)) : fmtClock(elapsedSec(a))}</em>${a.manual ? '' : paused ? ICON.play : ICON.pause}</b></button>
+            <div class="wh-cell"><span>VOLUME</span><b id="w-volume">${fmtW(st.volume, 1)}<small> ${unit()}</small></b></div>
+            <div class="wh-cell"><span>SÉRIES</span><b id="w-sets">${st.sets} / ${st.total}</b></div>
+            <i class="wh-prog"><em id="w-prog" style="width:${st.total ? st.sets / st.total * 100 : 0}%"></em></i>
+          </div>
         </div>
       </header>
       <div class="w-body">
-        ${a.exercises.map((ex, i) => exerciseBlock(ex, i)).join('')}
-        ${a.exercises.length ? '' : emptyState(EQ_ICON.halteres, 'Séance vide. Ajoute ton premier exercice.')}
-        <button class="btn-primary" data-action="w-add-ex">${ICON.plus} Exercice</button>
+        <div class="dnd-list" data-dnd="wex">${a.exercises.map((ex, i) => ex.kind === 'circuit' ? circuitBlock(ex, i) : exerciseBlock(ex, i, cur)).join('')}</div>
+        ${a.exercises.length ? '' : emptyState(EQ_ICON.halteres, 'Séance vide. Ajoute un exercice ou un circuit.')}
+        <div class="w-add-row">
+          <button class="dash-btn" data-action="w-add-ex">${ICON.plus}Exercice</button>
+          <button class="dash-btn purple" data-action="w-add-circuit">${ICON.plus}Circuit</button>
+        </div>
+        <button class="btn-primary" data-action="w-finish">${ICON.check} Terminer la séance</button>
         <button class="btn-plain danger" data-action="w-cancel">Abandonner l'entraînement</button>
       </div>
       <div id="rest-panel"></div>
@@ -1258,51 +1369,67 @@ function renderWorkout(animateOpen = false) {
   renderMiniBar();
 }
 
-function exerciseBlock(ex, i) {
+function exerciseBlock(ex, i, cur) {
+  const a = S.active;
   const e = EX.get(ex.exerciseId);
   const prev = prevSets(ex.exerciseId);
+  const prevEx = a.exercises[i - 1], nextEx = a.exercises[i + 1];
+  const ss = !!ex.supersetId;
+  const ssFirst = ss && !(prevEx && prevEx.supersetId === ex.supersetId);
+  const ssLast = ss && !(nextEx && nextEx.supersetId === ex.supersetId);
   const rows = ex.sets.map((s, j) => {
     const p = prev[j];
     const ph = placeholderFor(ex, j, prev);
-    return `<div class="set-row ${s.completed ? 'done' : ''} ${s.isRecord ? 'rec' : ''}">
-      <button class="set-num" data-action="w-set-menu" data-ex="${i}" data-set="${j}">${j + 1}</button>
-      <span class="set-prev">${s.isRecord ? '<span class="rec-badge">RECORD</span>' : (p ? `${fmtNum(p.weight, 2)}×${p.reps}` : '—')}</span>
-      <input class="set-in" inputmode="decimal" enterkeyhint="next" data-input="w-weight" data-change="w-commit" data-ex="${i}" data-set="${j}" value="${s.weight ?? ''}" placeholder="${ph.weight ?? ''}">
+    const isCur = cur && cur[0] === i && cur[1] === j;
+    const t = s.type || 'normal';
+    return `<div class="set-row ${s.completed ? 'done' : ''} ${isCur ? 'cur' : ''} t-${t}">
+      <button class="set-num" data-action="w-set-menu" data-ex="${i}" data-set="${j}">${setLabel(ex, j)}${t === 'drop' || t === 'failure' ? `<sup>${SET_TYPES[t].short}</sup>` : ''}</button>
+      <span class="set-prev">${p ? `${fmtW(p.weight)}×${p.reps}` : '—'}</span>
+      <input class="set-in" inputmode="decimal" enterkeyhint="next" data-input="w-weight" data-change="w-commit" data-ex="${i}" data-set="${j}" value="${inputW(s.weight)}" placeholder="${ph.weight != null ? inputW(ph.weight) : ''}">
       <input class="set-in" inputmode="numeric" enterkeyhint="done" data-input="w-reps" data-change="w-commit" data-ex="${i}" data-set="${j}" value="${s.reps ?? ''}" placeholder="${ph.reps ?? ''}">
       <button class="set-check" data-action="w-check" data-ex="${i}" data-set="${j}" aria-label="Valider la série">${ICON.check}</button>
-    </div>`;
-  }).join('');
-  return `<section class="ex-card">
-    <div class="ex-head">
-      ${exThumb(e)}
-      <div class="ex-info"><h3 class="tap" data-action="open-exercise" data-id="${ex.exerciseId}">${esc(exName(ex.exerciseId))}</h3>
-        <div class="ex-meta">
-          <button class="chip-sm" data-action="w-rest-edit" data-ex="${i}">${ICON.timer}${ex.restTime ? fmtClock(ex.restTime) : 'Off'}</button>
-          ${ex.tempo ? `<button class="chip-sm" data-action="w-tempo" data-ex="${i}">Tempo ${esc(ex.tempo)}</button>` : ''}
-        </div></div>
-      <button class="icon-btn" data-action="w-ex-menu" data-ex="${i}" aria-label="Options">${ICON.more}</button>
     </div>
-    <div class="set-row head"><span>#</span><span>PREV</span><span>${unit().toUpperCase()}</span><span>REPS</span><span>${ICON.check}</span></div>
-    ${rows}
-    <button class="btn-add-set" data-action="w-add-set" data-ex="${i}">${ICON.plus} Ajouter une série</button>
+    ${s.isRecord && s.completed ? `<div class="rec-line"><span class="rec-pill">${ICON.trophy}RECORD <b>${fmtW(s.weight)} ${unit()} × ${s.reps}</b></span></div>` : ''}`;
+  }).join('');
+  return `<section class="ex-card ${ss ? 'ss' : ''} ${ssFirst ? 'ss-first' : ''} ${ssLast ? 'ss-last' : ''}" data-drag-id="${i}" data-kind="wex">
+    ${ssFirst ? '<span class="ss-label">SUPERSET</span>' : ''}
+    <div class="ex-head">
+      <span class="drag-h" aria-label="Déplacer l'exercice">${GRIP}</span>
+      ${exThumb(e)}
+      <h3 class="ex-name tap" data-action="open-exercise" data-id="${ex.exerciseId}">${esc(exName(ex.exerciseId))}</h3>
+      <button class="icon-btn sm ${e && e.note ? 'has-note' : ''}" data-action="w-note" data-ex="${i}" aria-label="Note">${ICON.note}</button>
+      <button class="icon-btn sm" data-action="w-ex-menu" data-ex="${i}" aria-label="Options">${ICON.more}</button>
+    </div>
+    ${e && e.note ? `<p class="ex-note tap" data-action="w-note" data-ex="${i}">${esc(e.note)}</p>` : ''}
+    <div class="ex-params">
+      <button data-action="w-rest-edit" data-ex="${i}">${ICON.timer}<span>REPOS</span>›<b>${ex.restTime ? fmtClock(ex.restTime) : 'Aucun'}</b></button>
+      <button data-action="w-tempo" data-ex="${i}">${ICON.metro}<span>TEMPO</span>›<b class="${ex.tempo ? '' : 'muted'}">${ex.tempo ? esc(ex.tempo) : 'Aucun'}</b></button>
+    </div>
+    <div class="set-table">
+      <div class="set-row head"><span>#</span><span>PREV</span><span>${unit().toUpperCase()}</span><span>REPS</span><span></span></div>
+      ${rows}
+    </div>
+    <button class="btn-add-set dashed" data-action="w-add-set" data-ex="${i}">${ICON.plus} Ajouter une série</button>
   </section>`;
 }
 
-/** Met à jour l'en-tête (volume, séries) sans tout re-rendre */
+/** Met à jour l'en-tête (volume, séries, progression) sans tout re-rendre */
 function updateWorkoutStats() {
   if (!S.active) return;
   const st = wStats(S.active);
-  const v = $('#w-volume'), s = $('#w-sets');
-  if (v) v.textContent = `${fmtNum(st.volume)} ${unit()}`;
+  const v = $('#w-volume'), s = $('#w-sets'), p = $('#w-prog');
+  if (v) v.innerHTML = `${fmtW(st.volume, 1)}<small> ${unit()}</small>`;
   if (s) s.textContent = `${st.sets} / ${st.total}`;
+  if (p) p.style.width = (st.total ? st.sets / st.total * 100 : 0) + '%';
 }
 
 /** Recalcule le record de l'exercice dans la séance en cours. Renvoie la série record. */
 function recomputeRecords(ex) {
+  if (!ex || ex.kind === 'circuit') return null;
   const hist = bestE1RM(ex.exerciseId, S.active.id);
   let top = null, topV = 0;
   for (const s of ex.sets) {
-    const v = s.completed ? e1rm(s.weight, s.reps) : 0;
+    const v = s.completed && isWork(s) ? e1rm(s.weight, s.reps) : 0;
     if (v > topV) { topV = v; top = s; }
   }
   for (const s of ex.sets) s.isRecord = s === top && hist > 0 && topV > hist;
@@ -1313,7 +1440,7 @@ let persistTimer;
 const persistSoon = () => { clearTimeout(persistTimer); persistTimer = setTimeout(persistActive, 300); };
 const setAt = el => S.active.exercises[+el.dataset.ex].sets[+el.dataset.set];
 
-INPUTS['w-weight'] = el => { setAt(el).weight = parseNum(el.value); updateWorkoutStats(); persistSoon(); };
+INPUTS['w-weight'] = el => { setAt(el).weight = fromU(parseNum(el.value)); updateWorkoutStats(); persistSoon(); };
 INPUTS['w-reps'] = el => { const v = parseNum(el.value); setAt(el).reps = v == null ? null : Math.round(v); updateWorkoutStats(); persistSoon(); };
 // Modification d'une série déjà validée : on recalcule les records
 CHANGES['w-commit'] = el => {
@@ -1336,14 +1463,20 @@ ACTIONS['w-check'] = el => {
   } else {
     // Champs vides -> on reprend les valeurs proposées
     const ph = placeholderFor(ex, setIdx, prevSets(ex.exerciseId));
-    if (s.reps == null) s.reps = ph.reps ?? null;
+    if (s.reps == null) s.reps = ph.repsFill ?? null;
     if (s.weight == null) s.weight = ph.weight ?? 0;
     if (!s.reps) { toast('Indique le nombre de répétitions'); s.reps = null; return; }
     s.completed = true; s.timestamp = Date.now();
     vibrate(12);
     const rec = recomputeRecords(ex);
     if (rec === s) { toast('🏆 Nouveau record !'); vibrate([30, 60, 30]); }
-    if (ex.restTime > 0 && !a.manual) startRest(ex.restTime, exIdx, setIdx);
+    // Superset : pas de repos entre les exercices du groupe, seulement après le dernier
+    const next = a.exercises[exIdx + 1];
+    const chained = ex.supersetId && next && next.kind !== 'circuit' && next.supersetId === ex.supersetId;
+    if (ex.restTime > 0 && !a.manual && !chained) {
+      if (S.settings.restAuto !== false) startRest(ex.restTime, exIdx, setIdx);
+      else { a.rest = null; a.restReady = { sec: ex.restTime, exIdx, setIdx }; }
+    }
   }
   persistActive();
   renderWorkout();
@@ -1357,15 +1490,18 @@ ACTIONS['w-add-set'] = el => {
 
 ACTIONS['w-set-menu'] = el => {
   const ex = S.active.exercises[+el.dataset.ex], j = +el.dataset.set;
-  actionSheet(`Série ${j + 1}`, [
-    { label: 'Dupliquer la série', fn: () => { const s = ex.sets[j]; ex.sets.splice(j + 1, 0, { ...newSet(0), weight: s.weight, reps: s.reps }); renum(ex); persistActive(); renderWorkout(); } },
+  const s = ex.sets[j], t = s.type || 'normal';
+  const setType = type => { s.type = type; if (type === 'warmup') s.isRecord = false; recomputeRecords(ex); persistActive(); renderWorkout(); };
+  actionSheet(`Série ${setLabel(ex, j)}`, [
+    ...Object.entries(SET_TYPES).filter(([k]) => k !== t).map(([k, v]) => ({ label: v.label, fn: () => setType(k) })),
+    { label: 'Dupliquer la série', fn: () => { ex.sets.splice(j + 1, 0, { ...newSet(0), weight: s.weight, reps: s.reps, type: t }); renum(ex); persistActive(); renderWorkout(); } },
     { label: 'Supprimer la série', danger: true, fn: () => { ex.sets.splice(j, 1); renum(ex); recomputeRecords(ex); persistActive(); renderWorkout(); } }
   ]);
 };
 const renum = ex => ex.sets.forEach((s, k) => { s.setNumber = k + 1; });
 
 ACTIONS['w-add-ex'] = () => openPicker(ids => {
-  ids.forEach(id => S.active.exercises.push({ exerciseId: id, restTime: S.settings.restTimerDefault, tempo: '', targetReps: null, sets: [newSet(1), newSet(2), newSet(3)] }));
+  ids.forEach(id => S.active.exercises.push({ exerciseId: id, restTime: S.settings.restTimerDefault, tempo: '', targetReps: null, supersetId: null, sets: [newSet(1), newSet(2), newSet(3)] }));
   persistActive(); renderWorkout();
   setTimeout(() => { const b = $('.w-body'); b && b.scrollTo({ top: b.scrollHeight, behavior: 'smooth' }); }, 50);
 });
@@ -1377,7 +1513,7 @@ ACTIONS['w-rest-edit'] = async el => {
 };
 ACTIONS['w-tempo'] = async el => {
   const ex = S.active.exercises[+el.dataset.ex];
-  const v = await inputSheet('Tempo', ex.tempo, 'Ex. : 3-1-1-0 (excentrique-pause-concentrique-pause)');
+  const v = await inputSheet('Tempo', ex.tempo, 'Ex. : 3-1-1-0 (descente-pause-montée-pause)');
   if (v != null) { ex.tempo = v; persistActive(); renderWorkout(); }
 };
 ACTIONS['w-rename'] = async () => {
@@ -1385,17 +1521,93 @@ ACTIONS['w-rename'] = async () => {
   if (v) { S.active.name = v; persistActive(); renderWorkout(); }
 };
 
+/** Note d'un exercice : conservée sur l'exercice, retrouvée à chaque séance */
+ACTIONS['w-note'] = el => editExerciseNote(S.active.exercises[+el.dataset.ex].exerciseId, () => renderWorkout());
+function editExerciseNote(exerciseId, onDone) {
+  const e = EX.get(exerciseId); if (!e) return;
+  const sh = openSheet({
+    html: `<div class="dialog left"><h3>Note · ${esc(e.name)}</h3>
+      <textarea class="field area" id="note-in" placeholder="Ex. : siège cran 4, prise serrée, douleur épaule gauche…">${esc(e.note || '')}</textarea>
+      <p class="muted sm">La note est gardée et réaffichée à chaque séance avec cet exercice.</p>
+      <button class="btn-primary" data-action="note-save">Enregistrer</button>
+      ${e.note ? '<button class="btn-plain danger" data-action="note-del">Effacer la note</button>' : '<button class="btn-plain" data-action="sheet-close">Annuler</button>'}</div>`,
+    actions: {
+      'note-save': async () => { e.note = $('#note-in', sh.el).value.trim(); await save('exercises', e); sh.close(); onDone && onDone(); },
+      'note-del': async () => { e.note = ''; await save('exercises', e); sh.close(); onDone && onDone(); }
+    }
+  });
+  setTimeout(() => $('#note-in', sh.el)?.focus(), 350);
+}
+
 ACTIONS['w-ex-menu'] = el => {
   const a = S.active, i = +el.dataset.ex, ex = a.exercises[i];
+  const next = a.exercises[i + 1];
+  const canSS = next && next.kind !== 'circuit' && !(ex.supersetId && next.supersetId === ex.supersetId);
+  const move = d => { [a.exercises[i + d], a.exercises[i]] = [a.exercises[i], a.exercises[i + d]]; persistActive(); renderWorkout(); };
   actionSheet(exName(ex.exerciseId), [
     { label: 'Historique de l\'exercice', fn: () => openExerciseDetail(ex.exerciseId) },
-    { label: 'Temps de repos', fn: () => ACTIONS['w-rest-edit']({ dataset: { ex: i } }) },
-    { label: ex.tempo ? 'Modifier le tempo' : 'Ajouter un tempo', fn: () => ACTIONS['w-tempo']({ dataset: { ex: i } }) },
+    { label: (EX.get(ex.exerciseId)?.note ? 'Modifier la note' : 'Ajouter une note'), fn: () => ACTIONS['w-note']({ dataset: { ex: i } }) },
+    { label: 'Objectif de répétitions', fn: async () => { const v = await inputSheet('Répétitions visées', ex.targetReps || '', 'Ex. : 10 ou 8-12'); if (v == null) return; if (v && !parseRange(v)) { toast('Format : 10 ou 8-12'); return; } ex.targetReps = v ? parseRange(v).text : null; persistActive(); renderWorkout(); } },
+    ...(canSS ? [{ label: 'Superset avec l\'exercice suivant', fn: () => { const sid = ex.supersetId || next.supersetId || uid(); ex.supersetId = sid; next.supersetId = sid; persistActive(); renderWorkout(); } }] : []),
+    ...(ex.supersetId ? [{ label: 'Retirer du superset', fn: () => { ex.supersetId = null; cleanSupersets(a.exercises); persistActive(); renderWorkout(); } }] : []),
     { label: 'Remplacer l\'exercice', fn: () => openPicker(ids => { ex.exerciseId = ids[0]; ex.sets.forEach(s => { s.isRecord = false; }); recomputeRecords(ex); persistActive(); renderWorkout(); }) },
-    ...(i > 0 ? [{ label: 'Monter', fn: () => { [a.exercises[i - 1], a.exercises[i]] = [a.exercises[i], a.exercises[i - 1]]; persistActive(); renderWorkout(); } }] : []),
-    ...(i < a.exercises.length - 1 ? [{ label: 'Descendre', fn: () => { [a.exercises[i + 1], a.exercises[i]] = [a.exercises[i], a.exercises[i + 1]]; persistActive(); renderWorkout(); } }] : []),
-    { label: 'Supprimer l\'exercice', danger: true, fn: () => { a.exercises.splice(i, 1); if (a.rest && a.rest.exIdx === i) stopRest(); persistActive(); renderWorkout(); } }
+    ...(i > 0 ? [{ label: 'Monter', fn: () => move(-1) }] : []),
+    ...(i < a.exercises.length - 1 ? [{ label: 'Descendre', fn: () => move(1) }] : []),
+    { label: 'Supprimer l\'exercice', danger: true, fn: () => { a.exercises.splice(i, 1); cleanSupersets(a.exercises); stopRest(); persistActive(); renderWorkout(); } }
   ]);
+};
+/** Un superset d'un seul exercice n'a pas de sens : on le dissout */
+function cleanSupersets(list) {
+  const count = {};
+  list.forEach((e, k) => {
+    if (!e.supersetId) return;
+    const linked = (list[k - 1] && list[k - 1].supersetId === e.supersetId) || (list[k + 1] && list[k + 1].supersetId === e.supersetId);
+    if (!linked) e.supersetId = null;
+    else count[e.supersetId] = (count[e.supersetId] || 0) + 1;
+  });
+}
+
+/** Menu « … » de l'en-tête */
+ACTIONS['w-menu'] = () => {
+  const a = S.active;
+  actionSheet(a.name, [
+    { label: 'Terminer la séance', icon: ICON.check, fn: () => ACTIONS['w-finish']() },
+    ...(a.manual ? [{ label: 'Modifier la durée', fn: async () => { const v = await inputSheet('Durée (minutes)', String(a.durationMin), '60'); const n = parseInt(v, 10); if (n > 0) { a.durationMin = n; persistActive(); renderWorkout(); } } }]
+      : [{ label: a.pausedAt ? 'Reprendre le chrono' : 'Mettre en pause', fn: () => ACTIONS['w-pause']() }]),
+    { label: 'Renommer la séance', fn: () => ACTIONS['w-rename']() },
+    { label: 'Ajouter un exercice', fn: () => ACTIONS['w-add-ex']() },
+    { label: 'Ajouter un circuit', fn: () => ACTIONS['w-add-circuit']() },
+    { label: 'Abandonner l\'entraînement', danger: true, fn: () => ACTIONS['w-cancel']() }
+  ]);
+};
+
+/** Bouton ⏱ de l'en-tête : réglages du minuteur de repos */
+ACTIONS['w-timer-menu'] = () => {
+  const auto = S.settings.restAuto !== false;
+  const sh = openSheet({
+    html: `<div class="dialog left"><h3>Minuteur de repos</h3>
+      <button class="toggle-row ${auto ? 'on' : ''}" data-action="tm-auto"><span class="tgl"></span><span>Lancer le repos automatiquement à la validation d'une série</span></button>
+      <div class="opt-list">
+        <button class="opt" data-action="tm-default">${ICON.timer}<span>Repos par défaut : ${fmtClock(S.settings.restTimerDefault)}</span></button>
+        <button class="opt" data-action="tm-all">${ICON.timer}<span>Appliquer un repos à tous les exercices…</span></button>
+        ${S.active.rest ? `<button class="opt" data-action="tm-stop">${ICON.close}<span>Arrêter le repos en cours</span></button>` : ''}
+      </div>
+      <button class="btn-plain" data-action="sheet-close">Fermer</button></div>`,
+    actions: {
+      'tm-auto': async el => { S.settings.restAuto = !(S.settings.restAuto !== false); el.classList.toggle('on', S.settings.restAuto); await saveSettings(); renderRest(); },
+      'tm-default': async () => { const v = await restPickerSheet(S.settings.restTimerDefault); if (v != null) { S.settings.restTimerDefault = v; await saveSettings(); sh.close(); } },
+      'tm-all': async () => { const v = await restPickerSheet(null); if (v == null) return; S.active.exercises.forEach(e => { if (e.kind !== 'circuit') e.restTime = v; }); persistActive(); sh.close(); renderWorkout(); },
+      'tm-stop': () => { stopRest(); persistActive(); sh.close(); }
+    }
+  });
+};
+
+/** Pause / reprise du chrono de séance */
+ACTIONS['w-pause'] = () => {
+  const a = S.active; if (!a || a.manual) return;
+  if (a.pausedAt) { a.pausedTotal = (a.pausedTotal || 0) + (Date.now() - a.pausedAt); a.pausedAt = null; }
+  else a.pausedAt = Date.now();
+  persistActive(); renderWorkout();
 };
 
 function maximizeWorkout() { if (!S.active) return; S.active.minimized = false; persistActive(); $('#workout-root').className = 'open'; renderMiniBar(); }
@@ -1414,7 +1626,7 @@ function renderMiniBar() {
   const show = a && a.minimized;
   document.body.classList.toggle('has-mini', !!show);
   if (!show) { bar.classList.remove('show'); return; }
-  bar.innerHTML = `<span class="live"><i></i>LIVE</span><b>${esc(a.name)}</b><span id="mini-time">${a.manual ? fmtDateShort(a.startTime) : fmtClock((Date.now() - a.startTime) / 1000)}</span>
+  bar.innerHTML = `<span class="live"><i></i>${a.pausedAt ? 'PAUSE' : 'LIVE'}</span><b>${esc(a.name)}</b><span id="mini-time">${a.manual ? fmtDateShort(a.startTime) : fmtClock(elapsedSec(a))}</span>
     <span id="mini-rest" class="mini-rest">${a.rest ? fmtClock(Math.ceil((a.rest.endAt - Date.now()) / 1000)) : ''}</span>${ICON.chevD.replace('<svg', '<svg class="up"')}`;
   bar.classList.add('show');
 }
@@ -1423,11 +1635,12 @@ function renderMiniBar() {
    On stocke l'heure de fin (endAt) : le décompte reste juste même si
    l'app est suspendue (écran verrouillé) et reprend au retour. */
 function startRest(sec, exIdx, setIdx) {
+  S.active.restReady = null;
   S.active.rest = { endAt: Date.now() + sec * 1000, total: sec, exIdx, setIdx, done: false };
   scheduleRestNotification(sec);
 }
 function stopRest() {
-  if (S.active) S.active.rest = null;
+  if (S.active) { S.active.rest = null; S.active.restReady = null; }
   cancelRestNotification();
   renderRest(); renderMiniBar();
 }
@@ -1437,42 +1650,42 @@ ACTIONS['w-rest-plus'] = () => {
   scheduleRestNotification((r.endAt - Date.now()) / 1000);
   persistActive(); updateRestUI();
 };
-ACTIONS['w-rest-minus'] = () => {
-  const r = S.active.rest; if (!r) return;
-  r.endAt -= 15000; r.total = Math.max(15, r.total - 15);
-  scheduleRestNotification((r.endAt - Date.now()) / 1000);
-  persistActive(); updateRestUI();
-};
-ACTIONS['w-rest-skip'] = () => { stopRest(); persistActive(); $('.w-screen')?.classList.remove('has-rest'); };
+ACTIONS['w-rest-skip'] = () => { stopRest(); persistActive(); };
+ACTIONS['w-rest-go'] = () => { const r = S.active.restReady; if (!r) return; unlockAudio(); startRest(r.sec, r.exIdx, r.setIdx); persistActive(); renderRest(); };
+ACTIONS['w-rest-mode'] = async () => { S.settings.restAuto = !(S.settings.restAuto !== false); await saveSettings(); toast(S.settings.restAuto ? 'Repos automatique' : 'Repos à lancer manuellement'); renderRest(); };
 
-/** Texte "Suivant : …" — prochaine série non validée */
+/** « Suivant · Squat à la barre · S3 » */
 function nextSetText() {
-  const a = S.active, r = a.rest;
-  for (let i = r ? r.exIdx : 0; i < a.exercises.length; i++) {
-    const ex = a.exercises[i];
-    const j = ex.sets.findIndex((s, k) => !s.completed && (i > r.exIdx || k > r.setIdx));
-    if (j >= 0) return `${exName(ex.exerciseId)} — série ${j + 1}`;
-  }
-  return 'Dernière série terminée 💪';
+  const c = currentSet();
+  if (!c) return 'Dernière série terminée 💪';
+  const ex = S.active.exercises[c[0]];
+  const lab = setLabel(ex, c[1]);
+  return `${exName(ex.exerciseId)} · ${lab === 'É' ? 'échauffement' : 'S' + lab}`;
 }
 
 function renderRest() {
   const el = $('#rest-panel'); if (!el) return;
-  const r = S.active && S.active.rest;
-  $('.w-screen')?.classList.toggle('has-rest', !!r);
-  if (!r) { el.className = ''; el.innerHTML = ''; return; }
+  const a = S.active;
+  const r = a && a.rest, ready = a && !r && a.restReady;
+  $('.w-screen')?.classList.toggle('has-rest', !!(r || ready));
+  if (!r && !ready) { el.className = ''; el.innerHTML = ''; return; }
   const C = 2 * Math.PI * 26;
+  const mode = S.settings.restAuto !== false ? 'AUTO' : 'MANUEL';
+  const total = r ? r.total : ready.sec;
   el.className = 'show';
   el.innerHTML = `
     <div class="rest-ring">
       <svg viewBox="0 0 60 60"><circle cx="30" cy="30" r="26" class="ring-bg"/><circle id="ring-fg" cx="30" cy="30" r="26" class="ring-fg" stroke-dasharray="${C}" stroke-dashoffset="0"/></svg>
-      <span id="rest-time">0:00</span>
+      <span id="rest-pct">${r ? '' : '100%'}</span>
     </div>
-    <div class="rest-info"><span class="rest-label">Repos</span><span class="rest-next">Suivant : ${esc(nextSetText())}</span></div>
-    <div class="rest-btns">
-      <button class="rest-btn" data-action="w-rest-minus">−15</button>
-      <button class="rest-btn" data-action="w-rest-plus">+30s</button>
-      <button class="rest-btn primary" data-action="w-rest-skip">Passer</button>
+    <div class="rest-info">
+      <span class="rest-k"><i></i>REPOS · ${fmtClock(total)} · <button data-action="w-rest-mode">${mode}</button></span>
+      <b id="rest-time">${fmtClock(total)}</b>
+      <span class="rest-next">Suivant · ${esc(nextSetText())}</span>
+    </div>
+    <div class="rest-side">
+      ${r ? `<button class="rest-plus" data-action="w-rest-plus">+30s</button><button class="rest-skip" data-action="w-rest-skip">Passer</button>`
+        : `<button class="rest-plus" data-action="w-rest-go">${ICON.play}Lancer</button><button class="rest-skip" data-action="w-rest-skip">Ignorer</button>`}
     </div>`;
   updateRestUI();
 }
@@ -1480,24 +1693,223 @@ function renderRest() {
 function updateRestUI() {
   const r = S.active && S.active.rest; if (!r) return;
   const rem = Math.max(0, (r.endAt - Date.now()) / 1000);
+  const pct = r.total ? rem / r.total : 0;
   const t = $('#rest-time'); if (t) t.textContent = fmtClock(Math.ceil(rem));
+  const p = $('#rest-pct'); if (p) p.textContent = Math.round(pct * 100) + '%';
   const fg = $('#ring-fg');
-  if (fg) { const C = 2 * Math.PI * 26; fg.style.strokeDashoffset = C * (1 - rem / r.total); }
+  if (fg) { const C = 2 * Math.PI * 26; fg.style.strokeDashoffset = C * (1 - pct); }
   $('#rest-panel')?.classList.toggle('ending', rem <= 5);
   const m = $('#mini-rest'); if (m) m.textContent = fmtClock(Math.ceil(rem));
 }
 
-/** Boucle principale (chrono + minuteur), 4 fois par seconde */
+/* ============================ Circuits ==================================
+   Un circuit est un bloc de la séance : { kind: 'circuit', format, … }
+   - rounds : tours libres (chrono qui monte, « Tour terminé »)
+   - hiit   : travail / repos au chrono, N tours
+   - emom   : un effort au début de chaque minute, N minutes
+   - amrap  : un maximum de tours en X minutes
+   Le temps est calculé à partir d'horodatages (fiable même écran verrouillé). */
+const CIRCUIT_FORMATS = { rounds: 'Tours libres', hiit: 'HIIT', emom: 'EMOM', amrap: 'AMRAP' };
+const CIRCUIT_HELP = {
+  rounds: 'Enchaîne les exercices, valide chaque tour à ton rythme.',
+  hiit: 'Alternance travail / repos au chrono, pendant N tours.',
+  emom: 'Au début de chaque minute, fais le tour ; repose-toi le reste de la minute.',
+  amrap: 'Un maximum de tours dans le temps imparti.'
+};
+
+function circuitElapsed(c) {
+  if (!c.t.start) return 0;
+  const now = c.t.pausedAt || Date.now();
+  return Math.max(0, (now - c.t.start - (c.t.pausedTotal || 0)) / 1000);
+}
+/** État du chrono : texte principal, sous-titre, phase, tours faits automatiquement */
+function circuitState(c) {
+  const el = circuitElapsed(c);
+  if (c.format === 'amrap') {
+    const tot = c.minutes * 60;
+    return { big: fmtClock(Math.ceil(Math.max(0, tot - el))), sub: `${c.done} TOUR${c.done > 1 ? 'S' : ''}`, over: el >= tot, key: el >= tot ? 'over' : 'run' };
+  }
+  if (c.format === 'emom') {
+    const tot = c.rounds * 60, over = el >= tot;
+    const m = Math.min(c.rounds, Math.floor(el / 60) + 1);
+    return { big: fmtClock(over ? 0 : Math.ceil(60 - (el % 60))), sub: `MINUTE ${m} / ${c.rounds}`, over, auto: Math.min(c.rounds, Math.floor(el / 60)), key: over ? 'over' : 'm' + m };
+  }
+  if (c.format === 'hiit') {
+    const cyc = c.work + c.rest, tot = c.rounds * cyc - c.rest, over = el >= tot;
+    const r = Math.min(c.rounds, Math.floor(el / cyc) + 1);
+    const inC = el - (r - 1) * cyc, work = inC < c.work;
+    return { big: fmtClock(over ? 0 : Math.ceil(work ? c.work - inC : cyc - inC)), sub: over ? 'TERMINÉ' : `${work ? 'TRAVAIL' : 'REPOS'} · TOUR ${r} / ${c.rounds}`,
+      phase: work ? 'work' : 'rest', over, auto: Math.min(c.rounds, Math.floor((el + c.rest) / cyc)), key: over ? 'over' : r + (work ? 'w' : 'r') };
+  }
+  const over = c.done >= c.rounds;
+  return { big: fmtClock(el), sub: over ? 'TERMINÉ' : `TOUR ${Math.min(c.done + 1, c.rounds)} / ${c.rounds}`, over, key: 'r' + c.done };
+}
+function circuitStats(c) {
+  const perRound = c.items.reduce((acc, it) => acc + (it.weight || 0) * (parseRange(it.reps)?.min || 0), 0);
+  const total = c.format === 'amrap' ? Math.max(c.done, 1) * c.items.length : c.rounds * c.items.length;
+  return { volume: c.done * perRound, sets: c.done * c.items.length, total };
+}
+
+function circuitBlock(c, i) {
+  const st = circuitState(c);
+  const pct = c.format === 'amrap' ? Math.min(100, circuitElapsed(c) / (c.minutes * 60) * 100) : Math.min(100, c.done / c.rounds * 100);
+  const params = { rounds: `${c.rounds} TOURS`, hiit: `${c.rounds} TOURS · ${c.work}S / ${c.rest}S`, emom: `${c.rounds} MIN`, amrap: `${c.minutes} MIN` }[c.format];
+  const nDots = Math.min(12, c.format === 'amrap' ? Math.max(c.done + 1, 2) : c.rounds);
+  const running = c.t.start && !c.t.pausedAt && !st.over;
+  return `<section class="ex-card circuit" data-drag-id="${i}" data-kind="wex">
+    <div class="circ-top">
+      <span class="drag-h" aria-label="Déplacer le circuit">${GRIP}</span>
+      <span class="circ-badge">${ICON.circuit}CIRCUIT · ${CIRCUIT_FORMATS[c.format].toUpperCase()}</span>
+      <button class="icon-btn sm" data-action="c-menu" data-ex="${i}" aria-label="Options du circuit">${ICON.more}</button>
+    </div>
+    <h3 class="circ-name">${esc(c.name)}</h3>
+    <p class="circ-meta">${c.items.length} EXO${c.items.length > 1 ? 'S' : ''} · ${params} · ${Math.round(pct)} %</p>
+    <div class="circ-round"><span>${c.format === 'amrap' ? 'TOURS FAITS' : 'TOUR EN COURS'}</span>
+      <b>${c.format === 'amrap' ? c.done : `${Math.min(c.done + (st.over ? 0 : 1), c.rounds)} / ${c.rounds}`}</b>
+      <i><em id="ct-prog-${i}" style="width:${pct}%"></em></i></div>
+    <div class="circ-timer ${st.phase === 'rest' ? 'rest' : ''} ${st.over ? 'over' : ''}">
+      <span class="circ-fmt">${CIRCUIT_FORMATS[c.format].toUpperCase()}</span>
+      <b id="ct-big-${i}">${st.big}</b>
+      <span id="ct-sub-${i}" class="circ-sub">${st.sub}</span>
+      <div class="circ-btns">
+        ${!c.t.start ? `<button class="circ-done wide" data-action="c-start" data-ex="${i}">${ICON.play} Démarrer</button>`
+          : st.over ? `<span class="circ-end">Circuit terminé 💪</span>`
+          : `<button class="circ-pause" data-action="c-pause" data-ex="${i}">${c.t.pausedAt ? 'Reprendre' : 'Pause'}</button>
+             ${c.format === 'rounds' || c.format === 'amrap' ? `<button class="circ-done" data-action="c-round" data-ex="${i}">Tour terminé</button>` : ''}`}
+      </div>
+    </div>
+    <div class="circ-items">${c.items.map((it, k) => `
+      <button class="circ-item ${running && k === 0 ? 'cur' : ''}" data-action="c-item" data-ex="${i}" data-k="${k}">
+        <span class="ci-n">${k + 1}</span>
+        <span class="ci-txt"><b>${esc(exName(it.exerciseId))}</b><small>${it.reps ? esc(it.reps) + ' reps' : '—'} · ${it.weight ? fmtW(it.weight) + ' ' + unit() : 'poids du corps'}</small></span>
+        <span class="ci-dots">${Array.from({ length: nDots }, (_, d) => `<i class="${d < c.done ? 'on' : ''}"></i>`).join('')}</span>
+      </button>`).join('') || '<p class="empty-sm">Ajoute des exercices au circuit.</p>'}</div>
+    <button class="btn-add-set dashed purple" data-action="c-add" data-ex="${i}">${ICON.plus} Ajouter un exercice</button>
+  </section>`;
+}
+
+/** Création / modification d'un circuit */
+ACTIONS['w-add-circuit'] = () => openCircuitForm(null);
+function openCircuitForm(idx) {
+  const c0 = idx == null ? null : S.active.exercises[idx];
+  const d = c0 ? { format: c0.format, rounds: c0.rounds, work: c0.work, rest: c0.rest, minutes: c0.minutes, name: c0.name }
+    : { format: 'amrap', rounds: 3, work: 40, rest: 20, minutes: 15, name: 'Circuit' };
+  const num = (k, label, unitTxt) => `<label class="form-row"><span>${label}</span><input inputmode="numeric" data-input="cf-num" data-k="${k}" value="${d[k]}"><em>${unitTxt}</em></label>`;
+  const body = () => `<div class="dialog left"><h3>${c0 ? 'Modifier le circuit' : 'Nouveau circuit'}</h3>
+    <div class="grid-opts two">${Object.entries(CIRCUIT_FORMATS).map(([k, v]) => `<button class="opt-pill ${d.format === k ? 'on purple' : ''}" data-action="cf-fmt" data-v="${k}">${v}</button>`).join('')}</div>
+    <p class="muted sm">${CIRCUIT_HELP[d.format]}</p>
+    <label class="lbl">Nom</label><input class="field" data-input="cf-name" value="${esc(d.name)}" autocomplete="off">
+    <div class="card list-card form-list">
+      ${d.format === 'amrap' ? num('minutes', 'Durée', 'min') : d.format === 'emom' ? num('rounds', 'Durée', 'min') : num('rounds', 'Tours', '')}
+      ${d.format === 'hiit' ? num('work', 'Travail', 's') + num('rest', 'Repos', 's') : ''}
+    </div>
+    <button class="btn-primary purple" data-action="cf-go">${c0 ? 'Enregistrer' : 'Choisir les exercices'}</button>
+    <button class="btn-plain" data-action="sheet-close">Annuler</button></div>`;
+  const sh = openSheet({
+    html: body(),
+    inputs: { 'cf-num': el => { d[el.dataset.k] = parseInt(el.value, 10) || 0; }, 'cf-name': el => { d.name = el.value; } },
+    actions: {
+      'cf-fmt': el => { d.format = el.dataset.v; sh.set(body()); },
+      'cf-go': () => {
+        if (d.format === 'amrap' && !(d.minutes > 0)) { toast('Indique une durée'); return; }
+        if (d.format !== 'amrap' && !(d.rounds > 0)) { toast('Indique un nombre de tours'); return; }
+        if (d.format === 'hiit' && !(d.work > 0)) { toast('Indique un temps de travail'); return; }
+        d.rounds = clamp(d.rounds || 1, 1, 99); d.minutes = clamp(d.minutes || 1, 1, 180);
+        d.work = clamp(d.work || 1, 1, 600); d.rest = clamp(d.rest || 0, 0, 600);
+        d.name = d.name.trim() || 'Circuit';
+        sh.close();
+        if (c0) { Object.assign(c0, d); c0.lastKey = null; persistActive(); renderWorkout(); return; }
+        openPicker(ids => {
+          S.active.exercises.push({ kind: 'circuit', id: uid(), ...d, done: 0, items: ids.map(id => ({ exerciseId: id, reps: '10', weight: null })), t: { start: null, pausedAt: null, pausedTotal: 0 } });
+          persistActive(); renderWorkout();
+          setTimeout(() => { const b = $('.w-body'); b && b.scrollTo({ top: b.scrollHeight, behavior: 'smooth' }); }, 50);
+        });
+      }
+    }
+  });
+}
+
+const circAt = el => S.active.exercises[+el.dataset.ex];
+ACTIONS['c-start'] = el => { const c = circAt(el); unlockAudio(); c.t = { start: Date.now(), pausedAt: null, pausedTotal: 0 }; c.lastKey = null; beep(); persistActive(); renderWorkout(); };
+ACTIONS['c-pause'] = el => {
+  const c = circAt(el);
+  if (c.t.pausedAt) { c.t.pausedTotal += Date.now() - c.t.pausedAt; c.t.pausedAt = null; } else c.t.pausedAt = Date.now();
+  persistActive(); renderWorkout();
+};
+ACTIONS['c-round'] = el => {
+  const c = circAt(el);
+  c.done++; vibrate(15);
+  if (c.format === 'rounds' && c.done >= c.rounds) { c.t.pausedAt = Date.now(); beep(); toast('Circuit terminé 💪'); }
+  else toast(`Tour ${c.done} terminé`);
+  persistActive(); renderWorkout();
+};
+ACTIONS['c-add'] = el => {
+  const c = circAt(el);
+  openPicker(ids => { ids.forEach(id => c.items.push({ exerciseId: id, reps: '10', weight: null })); persistActive(); renderWorkout(); });
+};
+ACTIONS['c-item'] = el => {
+  const c = circAt(el), k = +el.dataset.k, it = c.items[k];
+  const sh = openSheet({
+    html: `<div class="dialog left"><h3>${esc(exName(it.exerciseId))}</h3>
+      <div class="card list-card form-list">
+        <label class="form-row"><span>Répétitions</span><input data-input="ci-reps" value="${esc(it.reps || '')}" placeholder="10"><em>reps</em></label>
+        <label class="form-row"><span>Charge</span><input inputmode="decimal" data-input="ci-w" value="${inputW(it.weight)}" placeholder="0"><em>${unit()}</em></label>
+      </div>
+      <p class="muted sm">Laisse la charge vide pour un exercice au poids du corps.</p>
+      <button class="btn-primary purple" data-action="ci-ok">OK</button>
+      <div class="opt-list">
+        ${k > 0 ? `<button class="opt" data-action="ci-up"><span>Monter</span></button>` : ''}
+        <button class="opt danger" data-action="ci-del"><span>Retirer du circuit</span></button>
+      </div></div>`,
+    inputs: { 'ci-reps': e2 => { it.reps = e2.value.trim(); }, 'ci-w': e2 => { const v = parseNum(e2.value); it.weight = v ? fromU(v) : null; } },
+    actions: {
+      'ci-ok': () => { sh.close(); persistActive(); renderWorkout(); },
+      'ci-up': () => { [c.items[k - 1], c.items[k]] = [c.items[k], c.items[k - 1]]; sh.close(); persistActive(); renderWorkout(); },
+      'ci-del': () => { c.items.splice(k, 1); sh.close(); persistActive(); renderWorkout(); }
+    }
+  });
+};
+ACTIONS['c-menu'] = el => {
+  const i = +el.dataset.ex, c = S.active.exercises[i];
+  actionSheet(c.name, [
+    { label: 'Modifier le format', fn: () => openCircuitForm(i) },
+    ...(c.done > 0 && (c.format === 'rounds' || c.format === 'amrap') ? [{ label: 'Annuler le dernier tour', fn: () => { c.done--; if (c.format === 'rounds' && c.t.pausedAt && c.done < c.rounds) { c.t.pausedTotal += Date.now() - c.t.pausedAt; c.t.pausedAt = null; } persistActive(); renderWorkout(); } }] : []),
+    ...(c.t.start ? [{ label: 'Réinitialiser le chrono', fn: () => { c.t = { start: null, pausedAt: null, pausedTotal: 0 }; c.done = 0; c.lastKey = null; persistActive(); renderWorkout(); } }] : []),
+    { label: 'Supprimer le circuit', danger: true, fn: async () => { if (!await confirmSheet('Supprimer le circuit ?', '', 'Supprimer', true)) return; S.active.exercises.splice(i, 1); persistActive(); renderWorkout(); } }
+  ]);
+};
+
+/** Mise à jour des chronos de circuit (appelée par tick) */
+function tickCircuits(a) {
+  let rerender = false;
+  a.exercises.forEach((c, i) => {
+    if (c.kind !== 'circuit' || !c.t.start) return;
+    const st = circuitState(c);
+    if (st.auto != null && st.auto > c.done) c.done = st.auto;
+    if (c.lastKey && c.lastKey !== st.key) { beep(); vibrate(150); rerender = true; }
+    if (c.lastKey !== st.key) { c.lastKey = st.key; persistSoon(); }
+    const b = $('#ct-big-' + i); if (b) b.textContent = st.big;
+    const s = $('#ct-sub-' + i); if (s) s.textContent = st.sub;
+    if (c.format === 'amrap') { const p = $('#ct-prog-' + i); if (p) p.style.width = Math.min(100, circuitElapsed(c) / (c.minutes * 60) * 100) + '%'; }
+  });
+  if (rerender && !document.activeElement?.matches('input, textarea')) renderWorkout();
+}
+
+/** Boucle principale (chrono, minuteur, circuits), 4 fois par seconde */
 function tick() {
   const a = S.active; if (!a) return;
-  const el = $('#w-elapsed'); if (el) el.textContent = fmtClock((Date.now() - a.startTime) / 1000);
-  const mt = !a.manual && $('#mini-time'); if (mt) mt.textContent = fmtClock((Date.now() - a.startTime) / 1000);
+  if (!a.manual) {
+    const t = fmtClock(elapsedSec(a));
+    const el = $('#w-elapsed'); if (el) el.textContent = t;
+    const mt = $('#mini-time'); if (mt) mt.textContent = t;
+  }
   if (a.rest) {
     const rem = (a.rest.endAt - Date.now()) / 1000;
     if (rem <= 0 && !a.rest.done) { a.rest.done = true; persistActive(); restFinished(); }
-    if (rem <= -1.5) { a.rest = null; persistActive(); renderRest(); renderMiniBar(); return; }
-    updateRestUI();
+    if (rem <= -1.5) { a.rest = null; persistActive(); renderRest(); renderMiniBar(); }
+    else updateRestUI();
   }
+  tickCircuits(a);
 }
 document.addEventListener('visibilitychange', () => { if (!document.hidden) tick(); });
 
@@ -1594,20 +2006,27 @@ ACTIONS['w-finish'] = async () => {
 async function saveWorkout({ name, makeTemplate }) {
   const a = S.active;
   const end = a.manual ? a.startTime + a.durationMin * 60000 : Date.now();
+  // Les circuits sont enregistrés comme des séries classiques (1 série par tour)
+  const circuitEntries = c => c.items.map(it => ({
+    exerciseId: it.exerciseId, restTime: 0, tempo: '', circuit: c.format,
+    sets: Array.from({ length: c.done }, (_, k) => ({ setNumber: k + 1, weight: it.weight || 0, reps: parseRange(it.reps)?.min || 0, completed: true, isRecord: false, timestamp: null, type: 'normal' }))
+  })).filter(e => e.sets.length && e.sets[0].reps);
+  const hasCircuit = a.exercises.some(e => e.kind === 'circuit');
   const w = {
     id: a.id, name: (name || '').trim() || a.name, templateId: a.templateId,
     date: dayKey(a.startTime), startTime: a.startTime, endTime: end,
-    duration: Math.round((end - a.startTime) / 1000),
+    duration: Math.round(elapsedSec(a)),
     plannedSets: wStats(a).total,
     exercises: a.exercises
-      .map(ex => ({ exerciseId: ex.exerciseId, restTime: ex.restTime, tempo: ex.tempo, sets: ex.sets.filter(s => s.completed).map((s, k) => ({ ...s, setNumber: k + 1 })) }))
+      .flatMap(ex => ex.kind === 'circuit' ? circuitEntries(ex)
+        : [{ exerciseId: ex.exerciseId, restTime: ex.restTime, tempo: ex.tempo, targetReps: ex.targetReps || null, supersetId: ex.supersetId || null, sets: ex.sets.filter(s => s.completed).map((s, k) => ({ ...s, setNumber: k + 1 })) }])
       .filter(ex => ex.sets.length)
   };
   await save('workouts', w);
   if (makeTemplate) {
     await save('templates', {
       id: uid(), name: w.name, folderId: null,
-      exercises: w.exercises.map(ex => ({ exerciseId: ex.exerciseId, restTime: ex.restTime, tempo: ex.tempo, targetSets: ex.sets.length, targetReps: ex.sets[0]?.reps || 10 }))
+      exercises: w.exercises.map(ex => ({ exerciseId: ex.exerciseId, restTime: ex.restTime, tempo: ex.tempo, supersetId: ex.supersetId || null, targetSets: ex.sets.length, targetReps: ex.targetReps || String(ex.sets[0]?.reps || 10) }))
     });
   }
   stopRest();
@@ -1615,7 +2034,7 @@ async function saveWorkout({ name, makeTemplate }) {
   renderWorkout();
   S.tab = 'activity'; S.selDay = null;
   S.calMonth = new Date(new Date(w.startTime).getFullYear(), new Date(w.startTime).getMonth(), 1);
-  if (a.manual) await recomputeAllRecords(); // une séance passée peut changer les records suivants
+  if (a.manual || hasCircuit) await recomputeAllRecords(); // séance passée ou circuit : on recalcule les records
   refreshAll();
   showSummary(w);
 }
@@ -1630,7 +2049,8 @@ function showSummary(w) {
   const planned = Math.max(w.plannedSets || 0, st.sets);
   const min = Math.round((w.duration || 0) / 60);
   const dur = `${Math.floor(min / 60)}:${pad(min % 60)}`;
-  const vol = st.volume >= 1000 ? [fmtNum(st.volume / 1000, 1), 'tonnes'] : [fmtNum(st.volume), unit()];
+  const vU = toU(st.volume);
+  const vol = vU >= 1000 ? [fmtNum(vU / 1000, 1), isLbs() ? 'k lbs' : 'tonnes'] : [fmtNum(vU), unit()];
   const d = new Date(w.startTime);
   const date = `${DAYS_LONG[d.getDay()]} ${d.getDate()} ${MONTHS[d.getMonth()].toLowerCase()} ${d.getFullYear()}`;
   const ms = muscleSets([w]);
@@ -1667,7 +2087,7 @@ function showSummary(w) {
         </div>
         ${recs.length ? `<div class="sum-card">
           <div class="sum-card-head"><h3>${recs.length} record${recs.length > 1 ? 's' : ''} battu${recs.length > 1 ? 's' : ''}</h3><span>CETTE SÉANCE</span></div>
-          ${recs.map(r => `<div class="sum-rec">${ICON.trophy}<span>${esc(exName(r.ex.exerciseId))}</span><b>${fmtNum(r.s.weight, 2)} ${unit()} × ${r.s.reps}</b></div>`).join('')}
+          ${recs.map(r => `<div class="sum-rec">${ICON.trophy}<span>${esc(exName(r.ex.exerciseId))}</span><b>${fmtW(r.s.weight)} ${unit()} × ${r.s.reps}</b></div>`).join('')}
         </div>` : ''}
         <button class="btn-primary" data-action="sum-close">Terminé</button>
         <button class="btn-plain" data-action="sum-detail" data-id="${w.id}">Voir le détail de la séance</button>
@@ -1786,7 +2206,7 @@ ACTIONS['open-stats'] = () => {
       ws.forEach(w => { const k = dayKey(w.startTime); byDay[k] = (byDay[k] || 0) + wStats(w).volume; });
       let acc = 0;
       const pts = [];
-      for (let t = from; t < end; t += DAY) { acc += byDay[dayKey(t)] || 0; pts.push({ x: t, y: acc }); }
+      for (let t = from; t < end; t += DAY) { acc += toU(byDay[dayKey(t)] || 0); pts.push({ x: t, y: acc }); }
       // Répartition par groupe
       const ms = muscleSets(ws);
       const cats = {};
@@ -1833,8 +2253,8 @@ ACTIONS['open-records'] = () => pushPage({
     if (!rows.length) return emptyState(ICON.trophy, 'Tes records apparaîtront ici après ta première séance.');
     return `<p class="muted sm pad">1RM estimé avec la formule d'Epley : poids × (1 + reps / 30).</p>
       <div class="card list-card">${rows.map(r => `<button class="rec-row tap" data-action="open-exercise" data-id="${r.e.id}">
-        ${exThumb(r.e)}<span class="ex-row-txt"><b>${esc(r.e.name)}</b><span class="muted sm">${fmtNum(r.best.best.weight, 2)} × ${r.best.best.reps} · ${fmtDateShort(r.best.w.startTime)}</span></span>
-        <span class="rec-val"><b>${fmtNum(r.best.e1rm, 1)}</b><small>${unit()} 1RM</small></span></button>`).join('')}</div>`;
+        ${exThumb(r.e)}<span class="ex-row-txt"><b>${esc(r.e.name)}</b><span class="muted sm">${fmtW(r.best.best.weight)} × ${r.best.best.reps} · ${fmtDateShort(r.best.w.startTime)}</span></span>
+        <span class="rec-val"><b>${fmtW(r.best.e1rm, 1)}</b><small>${unit()} 1RM</small></span></button>`).join('')}</div>`;
   }
 });
 
@@ -1956,6 +2376,7 @@ ACTIONS['open-settings'] = () => {
         </div>
         <div class="section-head"><h2>Entraînement</h2></div>
         <div class="card list-card">
+          <button class="set-row-btn" data-action="s-rest-auto"><span>Lancer le repos automatiquement</span><b>${S.settings.restAuto !== false ? 'Oui' : 'Non'}</b></button>
           <button class="set-row-btn" data-action="s-rest"><span>Repos par défaut</span><b>${fmtClock(S.settings.restTimerDefault)}</b>${ICON.chevR}</button>
           <label class="set-row-btn"><span>Objectif hebdomadaire</span>
             <select data-input="s-goal">${[1, 2, 3, 4, 5, 6, 7].map(n => `<option value="${n}" ${S.settings.weeklyGoal === n ? 'selected' : ''}>${n} séance${n > 1 ? 's' : ''}</option>`).join('')}</select></label>
@@ -1986,7 +2407,7 @@ ACTIONS['open-settings'] = () => {
     inputs: {
       's-name': async el => { S.settings.profileName = el.value; await saveSettings(); renderTab(); },
       's-goal': async el => { S.settings.weeklyGoal = +el.value; await saveSettings(); renderTab(); },
-      's-units': async el => { S.settings.units = el.value; await saveSettings(); refreshAll(); }
+      's-units': async el => { S.settings.units = el.value; await saveSettings(); refreshAll(); if (S.active) renderWorkout(); }
     },
     changes: { 's-import': el => importBackup(el.files[0]) },
     actions: {
@@ -1998,6 +2419,7 @@ ACTIONS['open-settings'] = () => {
         else if (Notification.permission === 'denied') toast('Autorise les notifications dans les réglages de l\'iPhone');
         renderPage(pg);
       },
+      's-rest-auto': async () => { S.settings.restAuto = !(S.settings.restAuto !== false); await saveSettings(); renderPage(pg); },
       's-export': exportBackup,
       's-check': async () => {
         if (!navigator.onLine) { toast('Pas de connexion Internet'); return; }
