@@ -26,7 +26,7 @@ const cap = s => s.charAt(0).toUpperCase() + s.slice(1);
 const norm = s => String(s).normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
 const DAY = 864e5;
 /** Version affichée dans Réglages (à augmenter à chaque mise en ligne) */
-const APP_VERSION = '1.13';
+const APP_VERSION = '1.14';
 
 const MONTHS = ['Janvier', 'Février', 'Mars', 'Avril', 'Mai', 'Juin', 'Juillet', 'Août', 'Septembre', 'Octobre', 'Novembre', 'Décembre'];
 const MONTHS_SHORT = ['janv.', 'févr.', 'mars', 'avr.', 'mai', 'juin', 'juil.', 'août', 'sept.', 'oct.', 'nov.', 'déc.'];
@@ -208,17 +208,31 @@ function bestE1RM(exerciseId, excludeId) {
   return best;
 }
 
-/** Séries de la dernière séance contenant cet exercice (colonne PREV) */
-function prevSets(exerciseId) {
-  const c = wCache();
-  if (c.prev.has(exerciseId)) return c.prev.get(exerciseId);
-  let out = [];
-  for (const w of workoutsDesc()) {
-    const ex = w.exercises.find(x => x.exerciseId === exerciseId);
-    if (ex) { const done = ex.sets.filter(s => s.completed); if (done.length) { out = done; break; } }
-  }
-  c.prev.set(exerciseId, out);
+/**
+ * Séries de la colonne PREV.
+ * `groupKey` = la séance concernée (id de séance type, ou « name:Nom » pour
+ * une séance libre). On prend d'abord la dernière fois où l'exercice a été
+ * fait DANS CETTE SÉANCE ; sinon, la dernière fois toutes séances confondues.
+ */
+function prevSets(exerciseId, groupKey = null) {
+  const c = wCache(), key = exerciseId + '|' + (groupKey || '');
+  if (c.prev.has(key)) return c.prev.get(key);
+  const lastIn = list => {
+    for (const w of list) {
+      const done = w.exercises.filter(x => x.exerciseId === exerciseId).flatMap(x => x.sets.filter(s => s.completed));
+      if (done.length) return done;
+    }
+    return null;
+  };
+  const all = workoutsDesc();
+  const out = (groupKey && lastIn(all.filter(w => groupKeyOf(w) === groupKey))) || lastIn(all) || [];
+  c.prev.set(key, out);
   return out;
+}
+/** Séance de l'entraînement en cours (pour la colonne PREV) */
+function activeGroupKey(a = S.active) {
+  if (!a) return null;
+  return a.templateId && S.data.templates.some(t => t.id === a.templateId) ? a.templateId : 'name:' + a.name;
 }
 
 /** Historique complet d'un exercice, du plus ancien au plus récent */
@@ -1094,7 +1108,7 @@ function openTemplateEditor(id, folderId = null) {
 
   const exCard = (e, i) => {
     const ex = EX.get(e.exerciseId);
-    const prev = prevSets(e.exerciseId);
+    const prev = prevSets(e.exerciseId, draft.id);
     const pE = draft.exercises[i - 1], nE = draft.exercises[i + 1];
     const ss = !!e.supersetId;
     const ssFirst = ss && !(pE && pE.supersetId === e.supersetId), ssLast = ss && !(nE && nE.supersetId === e.supersetId);
@@ -1858,7 +1872,7 @@ function renderWorkout(animateOpen = false) {
 function exerciseBlock(ex, i, cur) {
   const a = S.active;
   const e = EX.get(ex.exerciseId);
-  const prev = prevSets(ex.exerciseId);
+  const prev = prevSets(ex.exerciseId, activeGroupKey());
   const prevEx = a.exercises[i - 1], nextEx = a.exercises[i + 1];
   const ss = !!ex.supersetId;
   const ssFirst = ss && !(prevEx && prevEx.supersetId === ex.supersetId);
@@ -1949,7 +1963,7 @@ ACTIONS['w-check'] = el => {
     recomputeRecords(ex);
   } else {
     // Champs vides -> on reprend les valeurs proposées
-    const ph = placeholderFor(ex, setIdx, prevSets(ex.exerciseId));
+    const ph = placeholderFor(ex, setIdx, prevSets(ex.exerciseId, activeGroupKey()));
     if (s.reps == null) s.reps = ph.repsFill ?? null;
     if (s.weight == null) s.weight = ph.weight ?? 0;
     if (!s.reps) { toast('Indique le nombre de répétitions'); s.reps = null; return; }

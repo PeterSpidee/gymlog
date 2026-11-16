@@ -9,7 +9,7 @@
      supprime les anciennes, puis l'app se recharge toute seule.
    Incrémenter CACHE_VERSION à chaque déploiement.
    ========================================================================== */
-const CACHE_VERSION = 'gymlog-v13';
+const CACHE_VERSION = 'gymlog-v14';
 const ASSETS = [
   './',
   './index.html',
