@@ -1168,3 +1168,6 @@ label.btn-soft { cursor: pointer; }
 .imp-steps { margin: 12px 0 4px; font-size: 14.5px; }
 .imp-steps ol { margin: 8px 0 0; padding-left: 20px; display: flex; flex-direction: column; gap: 4px; }
 .opt > svg + span { flex: 1; }
+
+/* Guide du raccourci iOS */
+.guide ol { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 10px; font-size: 15px; line-height: 1.4; }

@@ -26,7 +26,7 @@ const cap = s => s.charAt(0).toUpperCase() + s.slice(1);
 const norm = s => String(s).normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
 const DAY = 864e5;
 /** Version affichée dans Réglages (à augmenter à chaque mise en ligne) */
-const APP_VERSION = '1.14';
+const APP_VERSION = '1.15';
 
 const MONTHS = ['Janvier', 'Février', 'Mars', 'Avril', 'Mai', 'Juin', 'Juillet', 'Août', 'Septembre', 'Octobre', 'Novembre', 'Décembre'];
 const MONTHS_SHORT = ['janv.', 'févr.', 'mars', 'avr.', 'mai', 'juin', 'juil.', 'août', 'sept.', 'oct.', 'nov.', 'déc.'];
@@ -1975,7 +1975,7 @@ ACTIONS['w-check'] = el => {
     const next = a.exercises[exIdx + 1];
     const chained = ex.supersetId && next && next.kind !== 'circuit' && next.supersetId === ex.supersetId;
     if (ex.restTime > 0 && !a.manual && !chained) {
-      if (S.settings.restAuto !== false) startRest(ex.restTime, exIdx, setIdx);
+      if (S.settings.restAuto !== false) { startRest(ex.restTime, exIdx, setIdx); launchIOSTimer(ex.restTime); }
       else { a.rest = null; a.restReady = { sec: ex.restTime, exIdx, setIdx }; }
     }
   }
@@ -2094,6 +2094,7 @@ ACTIONS['w-timer-menu'] = () => {
   const sh = openSheet({
     html: `<div class="dialog left"><h3>Minuteur de repos</h3>
       <button class="toggle-row ${auto ? 'on' : ''}" data-action="tm-auto"><span class="tgl"></span><span>Lancer le repos automatiquement à la validation d'une série</span></button>
+      <button class="toggle-row ${S.settings.iosTimer ? 'on' : ''}" data-action="tm-ios"><span class="tgl"></span><span>Lancer aussi le minuteur de l'iPhone (raccourci)</span></button>
       <div class="opt-list">
         <button class="opt" data-action="tm-default">${ICON.timer}<span>Repos par défaut : ${fmtClock(S.settings.restTimerDefault)}</span></button>
         <button class="opt" data-action="tm-all">${ICON.timer}<span>Appliquer un repos à tous les exercices…</span></button>
@@ -2101,6 +2102,7 @@ ACTIONS['w-timer-menu'] = () => {
       </div>
       <button class="btn-plain" data-action="sheet-close">Fermer</button></div>`,
     actions: {
+      'tm-ios': async el => { S.settings.iosTimer = !S.settings.iosTimer; el.classList.toggle('on', S.settings.iosTimer); await saveSettings(); if (S.settings.iosTimer && !S.settings.iosTimerSeen) { S.settings.iosTimerSeen = true; await saveSettings(); openShortcutGuide(); } },
       'tm-auto': async el => { S.settings.restAuto = !(S.settings.restAuto !== false); el.classList.toggle('on', S.settings.restAuto); await saveSettings(); renderRest(); },
       'tm-default': async () => { const v = await restPickerSheet(S.settings.restTimerDefault); if (v != null) { S.settings.restTimerDefault = v; await saveSettings(); sh.close(); } },
       'tm-all': async () => { const v = await restPickerSheet(null); if (v == null) return; S.active.exercises.forEach(e => { if (e.kind !== 'circuit') e.restTime = v; }); persistActive(); sh.close(); renderWorkout(); },
@@ -2138,6 +2140,40 @@ function renderMiniBar() {
   bar.classList.add('show');
 }
 
+/* ----- Minuteur de l'iPhone via un raccourci iOS -----
+   GymLog ouvre shortcuts://run-shortcut?name=…&input=text&text=<secondes>.
+   Le raccourci (créé une fois par l'utilisateur) démarre le minuteur de
+   l'app Horloge : Dynamic Island, écran verrouillé, sonnerie, même sans réseau. */
+const shortcutName = () => (S.settings.iosTimerName || 'Repos GymLog').trim() || 'Repos GymLog';
+function launchIOSTimer(sec, force = false) {
+  if (!force && !S.settings.iosTimer) return;
+  const url = `shortcuts://run-shortcut?name=${encodeURIComponent(shortcutName())}&input=text&text=${Math.max(1, Math.round(sec))}`;
+  try { window.location.href = url; } catch (e) { /* hors iPhone : rien */ }
+}
+/** Guide pas à pas pour créer le raccourci */
+function openShortcutGuide() {
+  const sh = openSheet({
+    full: true,
+    html: `<div class="sheet-top"><span></span><h3>Minuteur de l'iPhone</h3><button class="link-btn strong" data-action="sheet-close">OK</button></div>
+      <p class="muted sm pad">À faire une seule fois, sur ton iPhone. Ensuite, chaque repos lancé dans GymLog démarre aussi le minuteur de l'iPhone (Dynamic Island, écran verrouillé, sonnerie).</p>
+      <div class="card guide">
+        <ol>
+          <li>Ouvre l'app <b>Raccourcis</b> (icône bleue et rose), onglet <b>Raccourcis</b>, puis touche <b>+</b> en haut à droite.</li>
+          <li>Touche le nom en haut et appelle le raccourci exactement <b>« ${esc(shortcutName())} »</b>.</li>
+          <li>Touche <b>Ajouter une action</b>, cherche <b>« Obtenir les nombres de l'entrée »</b> et ajoute-la. Si on te demande l'entrée, choisis <b>Entrée du raccourci</b>.</li>
+          <li>Cherche ensuite <b>« Démarrer le minuteur »</b> (app Horloge) et ajoute-la.</li>
+          <li>Dans cette action, touche la durée (ex. « 30 ») et choisis la variable <b>Nombres</b>. Touche l'unité et choisis <b>secondes</b>.</li>
+          <li>Si le raccourci demande ce qu'il reçoit, choisis <b>Texte</b>. Touche <b>OK</b> pour enregistrer.</li>
+        </ol>
+      </div>
+      <p class="muted sm pad">Le raccourci doit ressembler à : <i>Obtenir les nombres de Entrée du raccourci</i> → <i>Démarrer le minuteur pendant Nombres secondes</i>.</p>
+      <button class="btn-primary" data-action="sg-test">${ICON.timer} Tester (minuteur de 10 s)</button>
+      <p class="muted sm pad">Le test ouvre l'app Raccourcis, qui lance un minuteur de 10 secondes. La 1re fois, iOS peut demander une autorisation : accepte. Reviens ensuite sur GymLog avec « ◀ » en haut à gauche ou en balayant la barre du bas.</p>`,
+    actions: { 'sg-test': () => launchIOSTimer(10, true) }
+  });
+}
+ACTIONS['ios-timer-guide'] = openShortcutGuide;
+
 /* ----- Minuteur de repos -----
    On stocke l'heure de fin (endAt) : le décompte reste juste même si
    l'app est suspendue (écran verrouillé) et reprend au retour. */
@@ -2158,7 +2194,7 @@ ACTIONS['w-rest-plus'] = () => {
   persistActive(); updateRestUI();
 };
 ACTIONS['w-rest-skip'] = () => { stopRest(); persistActive(); };
-ACTIONS['w-rest-go'] = () => { const r = S.active.restReady; if (!r) return; unlockAudio(); startRest(r.sec, r.exIdx, r.setIdx); persistActive(); renderRest(); };
+ACTIONS['w-rest-go'] = () => { const r = S.active.restReady; if (!r) return; unlockAudio(); startRest(r.sec, r.exIdx, r.setIdx); persistActive(); renderRest(); launchIOSTimer(r.sec); };
 ACTIONS['w-rest-mode'] = async () => { S.settings.restAuto = !(S.settings.restAuto !== false); await saveSettings(); toast(S.settings.restAuto ? 'Repos automatique' : 'Repos à lancer manuellement'); renderRest(); };
 
 /** « Suivant · Squat à la barre · S3 » */
@@ -3424,6 +3460,12 @@ ACTIONS['open-settings'] = () => {
             <select data-input="s-units"><option value="kg" ${unit() === 'kg' ? 'selected' : ''}>Kilogrammes (kg)</option><option value="lbs" ${unit() === 'lbs' ? 'selected' : ''}>Livres (lbs)</option></select></label>
           <button class="set-row-btn" data-action="s-notif"><span>Notifications de repos</span><b>${permTxt}</b></button>
         </div>
+        <div class="section-head"><h2>Minuteur de l'iPhone</h2></div>
+        <div class="card list-card">
+          <button class="set-row-btn" data-action="s-ios"><span>Lancer le minuteur de l'iPhone à chaque repos</span><b>${S.settings.iosTimer ? 'Oui' : 'Non'}</b></button>
+          <label class="set-row-btn"><span>Nom du raccourci</span><input class="inline-in" data-input="s-ios-name" value="${esc(shortcutName())}" autocomplete="off"></label>
+          <button class="set-row-btn" data-action="ios-timer-guide"><span>Créer / tester le raccourci</span>${ICON.chevR}</button>
+        </div>
         <div class="section-head"><h2>Apparence</h2></div>
         <div class="seg">${[['auto', 'Auto'], ['light', 'Clair'], ['dark', 'Sombre']].map(([k, l]) => `<button class="${S.settings.theme === k ? 'on' : ''}" data-action="s-theme" data-v="${k}">${l}</button>`).join('')}</div>
         <div class="section-head"><h2>Données</h2></div>
@@ -3447,6 +3489,7 @@ ACTIONS['open-settings'] = () => {
     },
     inputs: {
       's-name': async el => { S.settings.profileName = el.value; await saveSettings(); renderTab(); },
+      's-ios-name': async el => { S.settings.iosTimerName = el.value; await saveSettings(); },
       's-goal': async el => { S.settings.weeklyGoal = +el.value; await saveSettings(); renderTab(); },
       's-units': async el => { S.settings.units = el.value; await saveSettings(); refreshAll(); if (S.active) renderWorkout(); }
     },
@@ -3454,6 +3497,7 @@ ACTIONS['open-settings'] = () => {
     actions: {
       's-rest': async () => { const v = await restPickerSheet(S.settings.restTimerDefault); if (v != null) { S.settings.restTimerDefault = v; await saveSettings(); renderPage(pg); } },
       's-theme': async el => { S.settings.theme = el.dataset.v; applyTheme(); await saveSettings(); renderPage(pg); },
+      's-ios': async () => { S.settings.iosTimer = !S.settings.iosTimer; await saveSettings(); renderPage(pg); if (S.settings.iosTimer && !S.settings.iosTimerSeen) { S.settings.iosTimerSeen = true; await saveSettings(); openShortcutGuide(); } },
       's-notif': async () => {
         if (!('Notification' in window)) { toast('Installe l\'app sur l\'écran d\'accueil pour les notifications'); return; }
         if (Notification.permission === 'default') await Notification.requestPermission();
