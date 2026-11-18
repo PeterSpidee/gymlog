@@ -26,7 +26,7 @@ const cap = s => s.charAt(0).toUpperCase() + s.slice(1);
 const norm = s => String(s).normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
 const DAY = 864e5;
 /** Version affichée dans Réglages (à augmenter à chaque mise en ligne) */
-const APP_VERSION = '1.15';
+const APP_VERSION = '1.16';
 
 const MONTHS = ['Janvier', 'Février', 'Mars', 'Avril', 'Mai', 'Juin', 'Juillet', 'Août', 'Septembre', 'Octobre', 'Novembre', 'Décembre'];
 const MONTHS_SHORT = ['janv.', 'févr.', 'mars', 'avr.', 'mai', 'juin', 'juil.', 'août', 'sept.', 'oct.', 'nov.', 'déc.'];
